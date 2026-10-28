@@ -9,12 +9,18 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::application::LifecycleCoordinator;
-use crate::domain::{DraftProfileInput, ProfileId, ProfileStatus};
+use crate::domain::{
+    DraftProfileInput, MonitorDescriptor, MonitorIdentity, Profile, ProfileId, ProfileStatus,
+    TargetMonitorStatus,
+};
 
 /// Tampilan utama pengaturan profil Window Hop.
 pub struct WindowHopView {
     coordinator: LifecycleCoordinator,
     selected_profile_id: Option<ProfileId>,
+    selected_target_monitor: Option<MonitorIdentity>,
+    cached_monitors: Vec<MonitorDescriptor>,
+    monitors_error: Option<String>,
     window_handle: AnyWindowHandle,
     name_input: Entity<InputState>,
     path_input: Entity<InputState>,
@@ -44,9 +50,17 @@ impl WindowHopView {
         let initial_error = coordinator.last_error().map(|s| s.to_string());
         let is_error = initial_error.is_some();
 
+        let (cached_monitors, monitors_error) = match coordinator.available_monitors() {
+            Ok(m) => (m, None),
+            Err(e) => (Vec::new(), Some(e.to_string())),
+        };
+
         Self {
             coordinator,
             selected_profile_id: None,
+            selected_target_monitor: None,
+            cached_monitors,
+            monitors_error,
             window_handle: window.window_handle(),
             name_input,
             path_input,
@@ -54,6 +68,23 @@ impl WindowHopView {
             status_message: initial_error,
             is_error,
         }
+    }
+
+    /// Memperbarui cache daftar monitor yang terdeteksi secara manual atau saat ada perubahan.
+    pub fn refresh_monitors(&mut self, cx: &mut Context<Self>) {
+        match self.coordinator.available_monitors() {
+            Ok(monitors) => {
+                self.cached_monitors = monitors;
+                self.monitors_error = None;
+            }
+            Err(err) => {
+                let err_msg = err.to_string();
+                self.monitors_error = Some(err_msg.clone());
+                self.status_message = Some(format!("Gagal mendeteksi monitor: {}", err_msg));
+                self.is_error = true;
+            }
+        }
+        cx.notify();
     }
 
     /// Memilih profil untuk diedit atau beralih ke form profil baru.
@@ -67,11 +98,18 @@ impl WindowHopView {
         self.status_message = None;
         self.is_error = false;
 
+        // Segarkan cache monitor saat memilih profil agar informasi layar selalu mutakhir
+        if let Ok(monitors) = self.coordinator.available_monitors() {
+            self.cached_monitors = monitors;
+            self.monitors_error = None;
+        }
+
         if let Some(ref pid) = id {
             if let Some(profile) = self.coordinator.get_profile(pid).cloned() {
                 let name = profile.name().to_string();
                 let path = profile.browser_path().to_string_lossy().to_string();
                 let params = profile.custom_parameters().to_string();
+                self.selected_target_monitor = profile.target_monitor().cloned();
 
                 self.name_input.update(cx, |input, cx| {
                     input.set_value(name, window, cx);
@@ -85,6 +123,7 @@ impl WindowHopView {
             }
         } else {
             // Reset input form untuk profil baru
+            self.selected_target_monitor = None;
             self.name_input.update(cx, |input, cx| {
                 input.set_value("", window, cx);
             });
@@ -131,7 +170,7 @@ impl WindowHopView {
         .detach();
     }
 
-    /// Menyimpan profil draft secara asinkron tanpa memblokir thread UI.
+    /// Menyimpan profil draft atau profil dengan monitor tujuan secara asinkron tanpa memblokir thread UI.
     /// Operasi disk dijalankan di background executor, dan state memori hanya dikomit
     /// setelah persistensi berhasil.
     pub fn save_profile(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -140,7 +179,8 @@ impl WindowHopView {
         let params = self.params_input.read(cx).value().to_string();
 
         let browser_path = PathBuf::from(path_str.trim());
-        let input = DraftProfileInput::new(name, browser_path, params);
+        let input = DraftProfileInput::new(name, browser_path, params)
+            .with_target_monitor(self.selected_target_monitor.clone());
 
         let prepare_result = self
             .coordinator
@@ -157,7 +197,7 @@ impl WindowHopView {
         };
 
         let store = self.coordinator.store().clone();
-        self.status_message = Some("Menyimpan profil draft...".to_string());
+        self.status_message = Some("Menyimpan profil...".to_string());
         self.is_error = false;
         cx.notify();
 
@@ -177,9 +217,8 @@ impl WindowHopView {
                             Ok(()) => {
                                 view.coordinator.commit_saved_config(candidate_config);
                                 view.selected_profile_id = Some(target_id);
-                                view.status_message = Some(
-                                    "Profil draft berhasil disimpan secara atomik.".to_string(),
-                                );
+                                view.status_message =
+                                    Some("Profil berhasil disimpan secara atomik.".to_string());
                                 view.is_error = false;
                             }
                             Err(err) => {
@@ -202,6 +241,7 @@ impl Render for WindowHopView {
         let theme = cx.theme();
         let profiles = self.coordinator.list_profiles();
         let selected_id = self.selected_profile_id.clone();
+        let available_monitors = &self.cached_monitors;
 
         v_flex()
             .size_full()
@@ -266,7 +306,7 @@ impl Render for WindowHopView {
                                         .label("Tutup")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.status_message = None;
-                                            cx.notify();
+                                             cx.notify();
                                         })),
                                 ),
                         ),
@@ -317,6 +357,7 @@ impl Render for WindowHopView {
                                         .children(profiles.into_iter().map(|p| {
                                             let is_selected = selected_id.as_ref() == Some(p.id());
                                             let pid = p.id().clone();
+                                            let p_status = p.evaluate_status(available_monitors);
                                             let bg = if is_selected {
                                                 theme.accent.opacity(0.3)
                                             } else {
@@ -329,6 +370,13 @@ impl Render for WindowHopView {
                                             };
                                             let item_id =
                                                 SharedString::from(format!("profile-item-{}", pid));
+
+                                            let (status_text, status_color) = match p_status {
+                                                ProfileStatus::DraftNotReady => ("Draft", theme.muted_foreground),
+                                                ProfileStatus::Ready => ("Siap", theme.primary),
+                                                ProfileStatus::TargetUnavailable => ("Tidak Tersedia", theme.warning),
+                                                ProfileStatus::TargetAmbiguous => ("Ambigu", theme.danger),
+                                            };
 
                                             div()
                                                 .id(item_id)
@@ -366,12 +414,8 @@ impl Render for WindowHopView {
                                                                         .py_0p5()
                                                                         .rounded_sm()
                                                                         .bg(theme.muted)
-                                                                        .text_color(
-                                                                            theme.muted_foreground,
-                                                                        )
-                                                                        .child(match p.status() {
-                                                                            ProfileStatus::DraftNotReady => "Draft",
-                                                                        }),
+                                                                        .text_color(status_color)
+                                                                        .child(status_text),
                                                                 ),
                                                         )
                                                         .child(
@@ -383,6 +427,15 @@ impl Render for WindowHopView {
                                                                         .to_string_lossy()
                                                                         .to_string(),
                                                                 ),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(theme.muted_foreground)
+                                                                .child(match p.target_monitor() {
+                                                                    Some(m) => format!("Monitor: {}", m),
+                                                                    None => "Monitor: (Belum Dipilih)".to_string(),
+                                                                }),
                                                         ),
                                                 )
                                         }))
@@ -403,9 +456,9 @@ impl Render for WindowHopView {
                                 div()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(if selected_id.is_some() {
-                                        "Edit Profil Draft"
+                                        "Edit Profil"
                                     } else {
-                                        "Tambah Profil Draft Baru"
+                                        "Tambah Profil Baru"
                                     }),
                             )
                             // Field Nama Profil
@@ -444,16 +497,211 @@ impl Render for WindowHopView {
                                     .child(div().text_sm().child("Parameter Peluncuran Kustom:"))
                                     .child(Input::new(&self.params_input)),
                             )
-                            // Keterangan Status Kesiapan
+                            // Field Monitor Tujuan
                             .child(
+                                v_flex()
+                                    .gap_2()
+                                    .child(
+                                        h_flex()
+                                            .justify_between()
+                                            .items_center()
+                                            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Monitor Tujuan (Direkam Berdasarkan Identitas):"))
+                                            .child(
+                                                h_flex()
+                                                    .gap_2()
+                                                    .items_center()
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(theme.muted_foreground)
+                                                            .child(format!("{} monitor aktif", available_monitors.len())),
+                                                    )
+                                                    .child(
+                                                        Button::new("btn-refresh-monitors")
+                                                            .label("Segarkan Monitor")
+                                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                                this.refresh_monitors(cx);
+                                                            })),
+                                                    ),
+                                            ),
+                                    )
+                                    .when_some(self.monitors_error.as_ref(), |this, err| {
+                                        this.child(
+                                            div()
+                                                .p_2()
+                                                .rounded_md()
+                                                .bg(theme.danger.opacity(0.1))
+                                                .border_1()
+                                                .border_color(theme.danger)
+                                                .text_xs()
+                                                .text_color(theme.danger)
+                                                .child(format!("Peringatan sistem display: {}", err)),
+                                        )
+                                    })
+                                    .child(
+                                        v_flex()
+                                            .gap_2()
+                                            // Pilihan 1: Tanpa Monitor Tujuan (Draft)
+                                            .child({
+                                                let is_draft_selected = self.selected_target_monitor.is_none();
+                                                let (bg, border) = if is_draft_selected {
+                                                    (theme.accent.opacity(0.3), theme.primary)
+                                                } else {
+                                                    (theme.muted.opacity(0.3), theme.border)
+                                                };
+                                                div()
+                                                    .id("monitor-option-draft")
+                                                    .p_2()
+                                                    .rounded_md()
+                                                    .border_1()
+                                                    .border_color(border)
+                                                    .bg(bg)
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.selected_target_monitor = None;
+                                                        cx.notify();
+                                                    }))
+                                                    .child(
+                                                        h_flex()
+                                                            .justify_between()
+                                                            .items_center()
+                                                            .child(div().text_xs().font_weight(FontWeight::MEDIUM).child("Draft (Belum Memilih Monitor)"))
+                                                            .child(div().text_xs().text_color(theme.primary).child(if is_draft_selected { "✓ Terpilih" } else { "" })),
+                                                    )
+                                            })
+                                            // Pilihan untuk setiap monitor yang terhubung
+                                            .children(available_monitors.iter().map(|m| {
+                                                let is_this_selected = self.selected_target_monitor.as_ref() == Some(&m.identity);
+                                                let (bg, border) = if is_this_selected {
+                                                    (theme.accent.opacity(0.3), theme.primary)
+                                                } else {
+                                                    (theme.muted.opacity(0.3), theme.border)
+                                                };
+                                                let m_identity = m.identity.clone();
+                                                let item_id = SharedString::from(format!("monitor-item-{}", m.identity));
+
+                                                div()
+                                                    .id(item_id)
+                                                    .p_2()
+                                                    .rounded_md()
+                                                    .border_1()
+                                                    .border_color(border)
+                                                    .bg(bg)
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        this.selected_target_monitor = Some(m_identity.clone());
+                                                        cx.notify();
+                                                    }))
+                                                    .child(
+                                                        v_flex()
+                                                            .gap_0p5()
+                                                            .child(
+                                                                h_flex()
+                                                                    .justify_between()
+                                                                    .items_center()
+                                                                    .child(
+                                                                        div()
+                                                                            .text_xs()
+                                                                            .font_weight(FontWeight::MEDIUM)
+                                                                            .child(format!("{}{}", m.name, if m.is_primary { " (Primary)" } else { "" })),
+                                                                    )
+                                                                    .child(
+                                                                        div()
+                                                                            .text_xs()
+                                                                            .text_color(theme.primary)
+                                                                            .child(if is_this_selected { "✓ Terpilih" } else { "" }),
+                                                                    ),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(theme.muted_foreground)
+                                                                    .child(format!("Identitas: {}", m.identity)),
+                                                            ),
+                                                    )
+                                            }))
+                                            // Indikator jika monitor yang tersimpan sedang terputus atau diganti
+                                            .when_some(
+                                                self.selected_target_monitor.as_ref().filter(|id| !available_monitors.iter().any(|m| &m.identity == *id)),
+                                                |this, missing_id| {
+                                                    this.child(
+                                                        div()
+                                                            .p_2()
+                                                            .rounded_md()
+                                                            .border_1()
+                                                            .border_color(theme.warning)
+                                                            .bg(theme.warning.opacity(0.1))
+                                                            .child(
+                                                                v_flex()
+                                                                    .gap_0p5()
+                                                                    .child(
+                                                                        div()
+                                                                            .text_xs()
+                                                                            .font_weight(FontWeight::MEDIUM)
+                                                                            .text_color(theme.warning)
+                                                                            .child("⚠ Monitor Terpilih Sedang Tidak Terhubung / Telah Diganti:"),
+                                                                    )
+                                                                    .child(
+                                                                        div()
+                                                                            .text_xs()
+                                                                            .text_color(theme.muted_foreground)
+                                                                            .child(format!("Identitas: {}", missing_id)),
+                                                                    ),
+                                                            ),
+                                                    )
+                                                },
+                                            ),
+                                    ),
+                            )
+                            // Keterangan Status Kesiapan
+                            .child({
+                                let target_eval = match &self.selected_target_monitor {
+                                    None => TargetMonitorStatus::Unset,
+                                    Some(target_id) => {
+                                        let mut dummy_profile = Profile::new_draft(
+                                            ProfileId::new("dummy"),
+                                            "",
+                                            PathBuf::new(),
+                                            "",
+                                        );
+                                        dummy_profile.set_target_monitor(Some(target_id.clone()));
+                                        dummy_profile.evaluate_target_monitor(available_monitors)
+                                    }
+                                };
+
+                                let (status_text, status_color, status_bg) = match target_eval {
+                                    TargetMonitorStatus::Unset => (
+                                        "ℹ Status Kesiapan: Draft (Belum Siap Diaktifkan). Monitor tujuan belum dipilih; aplikasi tidak meluncurkan browser.".to_string(),
+                                        theme.muted_foreground,
+                                        theme.muted,
+                                    ),
+                                    TargetMonitorStatus::Available(desc) => (
+                                        format!("✓ Status Kesiapan: Siap Diaktifkan. Monitor tujuan terhubung: {} (Identitas: {}).", desc.name, desc.identity),
+                                        theme.primary,
+                                        theme.primary.opacity(0.12),
+                                    ),
+                                    TargetMonitorStatus::Unavailable { recorded_identity } => (
+                                        format!("⚠ Status Kesiapan: Monitor Tujuan Tidak Tersedia. Monitor '{}' tidak terhubung atau telah diganti. Silakan sambungkan kembali monitor yang cocok atau pilih ulang monitor tujuan dari daftar. Tidak ada fallback otomatis ke primary; profil belum dapat diaktifkan.", recorded_identity),
+                                        theme.warning,
+                                        theme.warning.opacity(0.12),
+                                    ),
+                                    TargetMonitorStatus::Ambiguous { recorded_identity, match_count } => (
+                                        format!("⚠ Status Kesiapan: Monitor Ambigu. Ditemukan {} monitor aktif dengan identitas '{}'. Silakan pilih ulang monitor tujuan yang benar; tidak ada fallback otomatis ke primary.", match_count, recorded_identity),
+                                        theme.danger,
+                                        theme.danger.opacity(0.12),
+                                    ),
+                                };
+
                                 div()
                                     .p_3()
                                     .rounded_md()
-                                    .bg(theme.muted)
+                                    .bg(status_bg)
+                                    .border_1()
+                                    .border_color(status_color)
                                     .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child("ℹ Status Kesiapan: Draft (Belum Siap Diaktifkan). Monitor tujuan belum dipilih; aplikasi tidak meluncurkan browser."),
-                            )
+                                    .text_color(status_color)
+                                    .child(status_text)
+                            })
                             // Tombol Aksi
                             .child(
                                 h_flex()
@@ -461,7 +709,7 @@ impl Render for WindowHopView {
                                     .child(
                                         Button::new("btn-save-profile")
                                             .primary()
-                                            .label("Simpan Profil Draft")
+                                            .label("Simpan Profil")
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 this.save_profile(window, cx);
                                             })),

@@ -55,18 +55,72 @@ impl fmt::Display for MonitorIdentity {
     }
 }
 
+/// Deskripsi monitor fisik yang terdeteksi oleh sistem.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MonitorDescriptor {
+    pub identity: MonitorIdentity,
+    pub name: String,
+    pub is_primary: bool,
+}
+
+/// Status evaluasi monitor tujuan terhadap monitor yang terdeteksi saat ini.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TargetMonitorStatus {
+    /// Monitor tujuan belum dipilih (draft).
+    Unset,
+    /// Monitor tujuan ditemukan secara unik dan tersedia.
+    Available(MonitorDescriptor),
+    /// Monitor tujuan tidak ditemukan di antara monitor yang terdeteksi saat ini.
+    Unavailable { recorded_identity: MonitorIdentity },
+    /// Identitas monitor cocok dengan lebih dari satu monitor yang aktif (ambigu),
+    /// membutuhkan pemilihan ulang oleh pengguna.
+    Ambiguous {
+        recorded_identity: MonitorIdentity,
+        match_count: usize,
+    },
+}
+
+impl fmt::Display for TargetMonitorStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unset => write!(f, "Belum Dipilih"),
+            Self::Available(m) => write!(f, "Tersedia: {}", m.name),
+            Self::Unavailable { recorded_identity } => {
+                write!(f, "Tidak Tersedia ({})", recorded_identity)
+            }
+            Self::Ambiguous {
+                recorded_identity,
+                match_count,
+            } => write!(
+                f,
+                "Ambigu: {} monitor terdeteksi dengan identitas '{}'",
+                match_count, recorded_identity
+            ),
+        }
+    }
+}
+
 /// Status kesiapan atau siklus hidup suatu profil.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProfileStatus {
     /// Profil draft belum memiliki monitor tujuan sehingga belum siap diaktifkan
     /// dan tidak boleh meluncurkan browser.
     DraftNotReady,
+    /// Monitor tujuan dipilih dan tersedia; siap diaktifkan.
+    Ready,
+    /// Monitor tujuan hilang/terputus; tidak tersedia.
+    TargetUnavailable,
+    /// Monitor tujuan ambigu atau berubah; meminta pemilihan ulang.
+    TargetAmbiguous,
 }
 
 impl fmt::Display for ProfileStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DraftNotReady => write!(f, "Draft (Belum Siap Diaktifkan)"),
+            Self::Ready => write!(f, "Siap Diaktifkan"),
+            Self::TargetUnavailable => write!(f, "Monitor Tujuan Tidak Tersedia"),
+            Self::TargetAmbiguous => write!(f, "Monitor Tujuan Ambigu (Perlu Pemilihan Ulang)"),
         }
     }
 }
@@ -77,6 +131,7 @@ pub struct DraftProfileInput {
     pub name: String,
     pub browser_path: PathBuf,
     pub custom_parameters: String,
+    pub target_monitor: Option<MonitorIdentity>,
 }
 
 impl DraftProfileInput {
@@ -90,7 +145,14 @@ impl DraftProfileInput {
             name: name.into(),
             browser_path,
             custom_parameters: custom_parameters.into(),
+            target_monitor: None,
         }
+    }
+
+    /// Menambahkan pilihan monitor tujuan ke data input profil.
+    pub fn with_target_monitor(mut self, target_monitor: Option<MonitorIdentity>) -> Self {
+        self.target_monitor = target_monitor;
+        self
     }
 }
 
@@ -146,13 +208,52 @@ impl Profile {
         self.target_monitor.as_ref()
     }
 
-    /// Status profil: profil draft tanpa monitor tujuan selalu `DraftNotReady`.
+    /// Status profil statis (tanpa konteks monitor OS).
+    /// Profil tanpa monitor tujuan selalu `DraftNotReady`.
+    /// Untuk evaluasi status kesiapan aktual berdasarkan deteksi monitor aktif,
+    /// gunakan `evaluate_status(&monitors)` atau `LifecycleCoordinator::get_profile_status`.
     pub fn status(&self) -> ProfileStatus {
-        if self.target_monitor.is_none() {
-            ProfileStatus::DraftNotReady
-        } else {
-            // Monitor assignment reserved for future tickets
-            ProfileStatus::DraftNotReady
+        ProfileStatus::DraftNotReady
+    }
+
+    /// Memperbarui monitor tujuan.
+    pub fn set_target_monitor(&mut self, monitor: Option<MonitorIdentity>) {
+        self.target_monitor = monitor;
+    }
+
+    /// Mengevaluasi status kecocokan monitor tujuan terhadap daftar monitor yang tersedia saat ini.
+    pub fn evaluate_target_monitor(
+        &self,
+        available_monitors: &[MonitorDescriptor],
+    ) -> TargetMonitorStatus {
+        let Some(ref target_id) = self.target_monitor else {
+            return TargetMonitorStatus::Unset;
+        };
+
+        let matches: Vec<&MonitorDescriptor> = available_monitors
+            .iter()
+            .filter(|m| &m.identity == target_id)
+            .collect();
+
+        match matches.len() {
+            0 => TargetMonitorStatus::Unavailable {
+                recorded_identity: target_id.clone(),
+            },
+            1 => TargetMonitorStatus::Available((*matches[0]).clone()),
+            count => TargetMonitorStatus::Ambiguous {
+                recorded_identity: target_id.clone(),
+                match_count: count,
+            },
+        }
+    }
+
+    /// Mengevaluasi status kesiapan profil berdasarkan ketersediaan monitor tujuan saat ini.
+    pub fn evaluate_status(&self, available_monitors: &[MonitorDescriptor]) -> ProfileStatus {
+        match self.evaluate_target_monitor(available_monitors) {
+            TargetMonitorStatus::Unset => ProfileStatus::DraftNotReady,
+            TargetMonitorStatus::Available(_) => ProfileStatus::Ready,
+            TargetMonitorStatus::Unavailable { .. } => ProfileStatus::TargetUnavailable,
+            TargetMonitorStatus::Ambiguous { .. } => ProfileStatus::TargetAmbiguous,
         }
     }
 
