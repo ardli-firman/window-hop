@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 1 ] || [ ! -r "$1" ]; then
+    printf '%s\n' 'Usage: commit-msg <readable-message-file>' >&2
+    exit 1
+fi
+
+# Ignore Git's comment lines and leading blank lines; normalize CRLF input.
+subject=$(sed 's/\r$//; /^[[:space:]]*#/d; /^[[:space:]]*$/d' "$1" | sed -n '1p')
+pattern='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9][a-z0-9._/-]*\))?!?: [^[:space:]].*$'
+
+if printf '%s\n' "$subject" | LC_ALL=C grep -Eq "$pattern"; then
+    exit 0
+fi
+
+printf '%s\n' \
+    'Commit rejected: use type(scope): description; scope is optional.' \
+    'Example: feat(profiles): activate a profile from its shortcut' \
+    'See CONTRIBUTING.md for types, scopes, and breaking changes.' >&2
+exit 1
