@@ -406,9 +406,6 @@ impl LifecycleCoordinator {
 
     /// Memeriksa apakah suatu profil dapat diaktifkan.
     /// Profil hanya diizinkan untuk diaktifkan jika monitor tujuan cocok dan tersedia (tanpa fallback),
-    /// serta adapter browser memiliki bukti pemisahan sesi dan penanganan kepemilikan.
-    /// Memeriksa apakah suatu profil dapat diaktifkan.
-    /// Profil hanya diizinkan untuk diaktifkan jika monitor tujuan cocok dan tersedia (tanpa fallback),
     /// adapter browser memiliki bukti pemisahan sesi dan penanganan kepemilikan,
     /// serta parameter peluncuran kustom tidak berbenturan dengan isolasi sesi profil.
     pub fn can_activate(&self, id: &ProfileId) -> Result<bool, ApplicationError> {

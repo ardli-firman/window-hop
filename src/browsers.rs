@@ -166,15 +166,23 @@ impl EdgeAdapter {
     pub fn validate_parsed_arguments<S: AsRef<str>>(&self, args: &[S]) -> Result<(), BrowserError> {
         for arg in args {
             let trimmed = arg.as_ref().trim();
-            for &(prefix, reason) in Self::CONFLICTING_PREFIXES {
-                if trimmed == prefix
-                    || trimmed.starts_with(&format!("{}=", prefix))
-                    || trimmed.starts_with(&format!("{}:", prefix))
-                {
-                    return Err(BrowserError::ConflictingIsolationParameter {
-                        arg: trimmed.to_string(),
-                        reason: reason.to_string(),
-                    });
+            let lower = trimmed.to_ascii_lowercase();
+            let normalized = lower
+                .strip_prefix("--")
+                .or_else(|| lower.strip_prefix('-'))
+                .or_else(|| lower.strip_prefix('/'));
+            if let Some(arg_body) = normalized {
+                for &(prefix, reason) in Self::CONFLICTING_PREFIXES {
+                    let clean_prefix = prefix.trim_start_matches('-');
+                    if arg_body == clean_prefix
+                        || arg_body.starts_with(&format!("{}=", clean_prefix))
+                        || arg_body.starts_with(&format!("{}:", clean_prefix))
+                    {
+                        return Err(BrowserError::ConflictingIsolationParameter {
+                            arg: trimmed.to_string(),
+                            reason: reason.to_string(),
+                        });
+                    }
                 }
             }
         }

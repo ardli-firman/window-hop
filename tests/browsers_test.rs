@@ -79,6 +79,27 @@ fn test_edge_adapter_rejects_conflicting_session_isolation_arguments() {
         }
         other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
     }
+
+    // Conflicting: case-insensitive & prefix-agnostic (/USER-DATA-DIR, -profile-directory)
+    let err3 = adapter
+        .validate_parsed_arguments(&["/USER-DATA-DIR=D:\\data"])
+        .unwrap_err();
+    match err3 {
+        BrowserError::ConflictingIsolationParameter { arg, .. } => {
+            assert!(arg.contains("/USER-DATA-DIR"));
+        }
+        other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
+    }
+
+    let err4 = adapter
+        .validate_parsed_arguments(&["-profile-directory:Profile2"])
+        .unwrap_err();
+    match err4 {
+        BrowserError::ConflictingIsolationParameter { arg, .. } => {
+            assert!(arg.contains("-profile-directory"));
+        }
+        other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
+    }
 }
 
 #[test]

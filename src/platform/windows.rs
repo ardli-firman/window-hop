@@ -1,11 +1,20 @@
 //! Windows display and monitor enumeration using Win32 APIs.
 
-use crate::domain::{MonitorDescriptor, MonitorIdentity};
-use crate::platform::{MonitorProvider, PlatformError};
+use crate::browsers::LaunchPlan;
+use crate::domain::{MonitorDescriptor, MonitorIdentity, ProcessId};
+use crate::platform::{ManagedProcess, MonitorProvider, PlatformError, ProcessLauncher};
+use std::process::{Child, Command};
+use std::sync::{Arc, Mutex};
 use windows::core::PCWSTR;
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    EnumDisplayDevicesW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP,
-    DISPLAY_DEVICE_PRIMARY_DEVICE,
+    EnumDisplayDevicesW, EnumDisplayMonitors, GetMonitorInfoW, DISPLAY_DEVICEW,
+    DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICE_PRIMARY_DEVICE, HDC, HMONITOR,
+    MONITORINFOEXW,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindowThreadProcessId, PostMessageW, SetWindowPos, SWP_NOACTIVATE,
+    SWP_NOZORDER, WM_CLOSE,
 };
 
 /// Implementasi MonitorProvider untuk sistem operasi Windows.
@@ -108,16 +117,60 @@ fn utf16_slice_to_string(slice: &[u16]) -> String {
     String::from_utf16_lossy(&slice[..len])
 }
 
-use crate::browsers::LaunchPlan;
-use crate::domain::ProcessId;
-use crate::platform::{ManagedProcess, ProcessLauncher};
-use std::process::{Child, Command};
-use std::sync::{Arc, Mutex};
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowThreadProcessId, PostMessageW, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, WM_CLOSE,
-};
+// Callback enumerasi monitor Win32 untuk menemukan koordinat fisik monitor berdasarkan MonitorIdentity
+unsafe extern "system" fn enum_monitors_for_rect(
+    hmonitor: HMONITOR,
+    _hdc: HDC,
+    _rect: *mut RECT,
+    lparam: LPARAM,
+) -> BOOL {
+    let state = &mut *(lparam.0 as *mut (String, Option<RECT>));
+    let mut info: MONITORINFOEXW = std::mem::zeroed();
+    info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+
+    if GetMonitorInfoW(hmonitor, &mut info.monitorInfo as *mut _).as_bool() {
+        let mut monitor_index = 0;
+        loop {
+            let mut monitor_device: DISPLAY_DEVICEW = std::mem::zeroed();
+            monitor_device.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+            let ok = EnumDisplayDevicesW(
+                PCWSTR(info.szDevice.as_ptr()),
+                monitor_index,
+                &mut monitor_device,
+                0,
+            );
+            if !ok.as_bool() {
+                break;
+            }
+            monitor_index += 1;
+
+            if (monitor_device.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) != 0 {
+                let id = utf16_slice_to_string(&monitor_device.DeviceID);
+                if id.trim() == state.0.as_str() {
+                    state.1 = Some(info.monitorInfo.rcMonitor);
+                    return BOOL(0); // Selesai, monitor tujuan ditemukan
+                }
+            }
+        }
+    }
+    BOOL(1)
+}
+
+/// Menemukan batas koordinat fisik monitor pada desktop berdasarkan identitas perangkat kerasnya.
+fn find_monitor_rect(identity: &MonitorIdentity) -> Option<RECT> {
+    let mut state = (identity.as_str().to_string(), None);
+    // SAFETY: EnumDisplayMonitors dipanggil dengan callback aman `enum_monitors_for_rect`
+    // dan pointer mutable valid ke `state`.
+    unsafe {
+        let _ = EnumDisplayMonitors(
+            None,
+            None,
+            Some(enum_monitors_for_rect),
+            LPARAM(&mut state as *mut _ as isize),
+        );
+    }
+    state.1
+}
 
 /// Handle proses browser yang dikelola pada Windows dengan verifikasi kepemilikan instance melalui Child handle.
 pub struct WindowsManagedProcess {
@@ -151,25 +204,38 @@ unsafe extern "system" fn enum_windows_close_callback(hwnd: HWND, lparam: LPARAM
     BOOL(1)
 }
 
-// Callback enumerasi jendela Win32 untuk memastikan penempatan jendela milik target_pid pada monitor tujuan
+struct RepositionContext {
+    target_pid: u32,
+    rect: RECT,
+    windows_moved: usize,
+}
+
+// Callback enumerasi jendela Win32 untuk menempatkan jendela milik target_pid pada koordinat fisik monitor tujuan
 unsafe extern "system" fn enum_windows_reposition_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    let target_pid = lparam.0 as u32;
+    let ctx = &mut *(lparam.0 as *mut RepositionContext);
     let mut window_pid = 0u32;
     // SAFETY: GetWindowThreadProcessId dipanggil dengan pointer valid ke `window_pid`.
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut window_pid)) };
-    if window_pid == target_pid {
-        // SAFETY: SetWindowPos dipanggil untuk memposisikan jendela milik target_pid tanpa mengubah ukuran atau Z-order sembarangan.
+    if window_pid == ctx.target_pid {
+        let x = ctx.rect.left;
+        let y = ctx.rect.top;
+        let width = ctx.rect.right - ctx.rect.left;
+        let height = ctx.rect.bottom - ctx.rect.top;
+
+        // SAFETY: SetWindowPos dipanggil untuk memposisikan jendela milik target_pid ke koordinat
+        // dan ukuran monitor tujuan fisik (tanpa SWP_NOMOVE).
         unsafe {
             let _ = SetWindowPos(
                 hwnd,
                 None,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                x,
+                y,
+                width,
+                height,
+                SWP_NOZORDER | SWP_NOACTIVATE,
             );
         };
+        ctx.windows_moved += 1;
     }
     BOOL(1)
 }
@@ -213,15 +279,37 @@ impl ManagedProcess for WindowsManagedProcess {
         Ok(())
     }
 
-    fn reposition(&self, _target_monitor: &MonitorDescriptor) -> Result<(), PlatformError> {
+    fn reposition(&self, target_monitor: &MonitorDescriptor) -> Result<(), PlatformError> {
         let target_pid = self.pid.as_u32();
-        // SAFETY: EnumWindows memanggil `enum_windows_reposition_callback` untuk menempatkan jendela pada monitor tujuan.
+        let rect = find_monitor_rect(&target_monitor.identity).ok_or_else(|| {
+            PlatformError::DeviceUnavailable(format!(
+                "Monitor '{}' ({}) tidak ditemukan pada desktop",
+                target_monitor.name,
+                target_monitor.identity.as_str()
+            ))
+        })?;
+
+        let mut ctx = RepositionContext {
+            target_pid,
+            rect,
+            windows_moved: 0,
+        };
+
+        // SAFETY: EnumWindows memanggil `enum_windows_reposition_callback` dengan konteks pointer valid.
         unsafe {
             let _ = EnumWindows(
                 Some(enum_windows_reposition_callback),
-                LPARAM(target_pid as isize),
+                LPARAM(&mut ctx as *mut _ as isize),
             );
         }
+
+        if ctx.windows_moved == 0 {
+            return Err(PlatformError::Os(format!(
+                "Belum ada window aktif yang ditemukan untuk proses {}",
+                target_pid
+            )));
+        }
+
         Ok(())
     }
 }
@@ -258,7 +346,18 @@ impl ProcessLauncher for WindowsProcessLauncher {
             .map_err(|e| PlatformError::Os(format!("Gagal meluncurkan browser: {}", e)))?;
 
         let managed = Arc::new(WindowsManagedProcess::new(child));
-        let _ = managed.reposition(target_monitor);
+
+        // Tunggu hingga UI thread browser selesai membuat HWND melalui retry loop polling singkat
+        let start_time = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(2000);
+        let poll_interval = std::time::Duration::from_millis(100);
+
+        while managed.is_alive() && start_time.elapsed() < timeout {
+            if managed.reposition(target_monitor).is_ok() {
+                break;
+            }
+            std::thread::sleep(poll_interval);
+        }
 
         Ok(managed)
     }
