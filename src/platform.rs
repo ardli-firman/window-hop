@@ -148,6 +148,11 @@ pub trait ManagedProcess: Send + Sync {
 
     /// Memindahkan atau memastikan penempatan jendela pada monitor tujuan.
     fn reposition(&self, target_monitor: &MonitorDescriptor) -> Result<(), PlatformError>;
+
+    /// Mengambil alasan penghentian proses jika diketahui (misal crash atau ditutup manual).
+    fn exit_reason(&self) -> Option<crate::domain::ExitReason> {
+        None
+    }
 }
 
 /// Seam antarmuka peluncuran proses terisolasi.
@@ -170,6 +175,7 @@ pub struct MockManagedProcess {
     force_stopped: AtomicBool,
     reposition_count: AtomicUsize,
     refuse_graceful: AtomicBool,
+    exit_reason: Mutex<Option<crate::domain::ExitReason>>,
 }
 
 impl MockManagedProcess {
@@ -183,6 +189,7 @@ impl MockManagedProcess {
             force_stopped: AtomicBool::new(false),
             reposition_count: AtomicUsize::new(0),
             refuse_graceful: AtomicBool::new(false),
+            exit_reason: Mutex::new(None),
         }
     }
 
@@ -216,9 +223,21 @@ impl MockManagedProcess {
         self.reposition_count.load(Ordering::SeqCst)
     }
 
+    /// Menyimulasikan proses keluar karena crash.
+    pub fn simulate_crash(&self) {
+        *self.exit_reason.lock().unwrap() = Some(crate::domain::ExitReason::Crash);
+        self.is_alive.store(false, Ordering::SeqCst);
+    }
+
+    /// Menyimulasikan proses keluar karena ditutup manual oleh pengguna.
+    pub fn simulate_manual_close(&self) {
+        *self.exit_reason.lock().unwrap() = Some(crate::domain::ExitReason::ManualClose);
+        self.is_alive.store(false, Ordering::SeqCst);
+    }
+
     /// Menyimulasikan proses keluar secara mandiri.
     pub fn simulate_exit(&self) {
-        self.is_alive.store(false, Ordering::SeqCst);
+        self.simulate_manual_close();
     }
 }
 
@@ -250,6 +269,10 @@ impl ManagedProcess for MockManagedProcess {
         *guard = target_monitor.clone();
         self.reposition_count.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+
+    fn exit_reason(&self) -> Option<crate::domain::ExitReason> {
+        *self.exit_reason.lock().unwrap()
     }
 }
 
