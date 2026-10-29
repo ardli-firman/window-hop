@@ -220,3 +220,98 @@ fn test_parse_activation_flag_extracts_profile_id_when_present() {
     ];
     assert_eq!(parse_activation_flag(args_trailing_flag), None);
 }
+
+#[test]
+fn test_parse_silent_or_startup_flag() {
+    use window_hop::platform::parse_silent_or_startup_flag;
+
+    assert!(parse_silent_or_startup_flag(vec![
+        "window-hop.exe".to_string(),
+        "--startup".to_string(),
+    ]));
+
+    assert!(parse_silent_or_startup_flag(vec![
+        "window-hop.exe".to_string(),
+        "--silent".to_string(),
+    ]));
+
+    assert!(parse_silent_or_startup_flag(vec![
+        "window-hop.exe".to_string(),
+        "--tray".to_string(),
+    ]));
+
+    assert!(!parse_silent_or_startup_flag(vec![
+        "window-hop.exe".to_string(),
+    ]));
+
+    assert!(!parse_silent_or_startup_flag(vec![
+        "window-hop.exe".to_string(),
+        "--other-flag".to_string(),
+    ]));
+}
+
+#[test]
+fn test_mock_tray_provider_updates_status_and_triggers_actions() {
+    use window_hop::domain::TrayStatusSummary;
+    use window_hop::platform::{MockTrayProvider, TrayAction, TrayProvider};
+
+    let tray = MockTrayProvider::new();
+    assert_eq!(tray.update_count(), 0);
+    assert!(!tray.is_removed());
+    assert_eq!(tray.last_status(), None);
+
+    let summary = TrayStatusSummary::new(
+        "Profil 'Antrian Poli' berjalan",
+        "Window Hop\nProfil 'Antrian Poli' berjalan",
+        1,
+        0,
+        false,
+        None,
+    );
+
+    tray.update_status(&summary).expect("update status");
+    assert_eq!(tray.update_count(), 1);
+    assert_eq!(tray.last_status(), Some(summary));
+
+    let recorded_actions = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let actions_clone = recorded_actions.clone();
+
+    tray.set_action_handler(Box::new(move |action| {
+        actions_clone.lock().unwrap().push(action);
+    }))
+    .expect("set action handler");
+
+    tray.trigger_action(TrayAction::OpenSettings);
+    tray.trigger_action(TrayAction::Exit);
+
+    let actions = recorded_actions.lock().unwrap().clone();
+    assert_eq!(actions, vec![TrayAction::OpenSettings, TrayAction::Exit]);
+
+    tray.remove_tray().expect("remove tray");
+    assert!(tray.is_removed());
+}
+
+#[test]
+fn test_local_single_instance_coordinator_handles_open_settings_command() {
+    let dir = tempdir().expect("tempdir");
+    let primary = LocalSingleInstanceCoordinator::new(dir.path().to_path_buf());
+
+    let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let received_clone = received.clone();
+    primary
+        .start_listener(Box::new(move |cmd| {
+            received_clone.lock().unwrap().push(cmd);
+        }))
+        .expect("start listener");
+
+    let secondary = LocalSingleInstanceCoordinator::new(dir.path().to_path_buf());
+    let sent = secondary
+        .send_activation(&ActivationCommand::OpenSettings)
+        .expect("send OpenSettings");
+    assert!(sent, "OpenSettings must be delivered to primary");
+
+    std::thread::sleep(Duration::from_millis(100));
+    let cmds = received.lock().unwrap().clone();
+    assert_eq!(cmds.len(), 1);
+    assert_eq!(cmds[0], ActivationCommand::OpenSettings);
+}

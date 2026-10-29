@@ -13,8 +13,8 @@ use window_hop::domain::{
 use window_hop::persistence::{FileProfileStore, MemoryProfileStore};
 use window_hop::platform::{
     ActivationCommand, Clock, LocalSingleInstanceCoordinator, ManagedProcess, MockClock,
-    MockMonitorProvider, MockProcessLauncher, MockShortcutCreator, ProcessLauncher,
-    SingleInstanceCoordinator,
+    MockMonitorProvider, MockProcessLauncher, MockShortcutCreator, MockTrayProvider,
+    ProcessLauncher, SingleInstanceCoordinator,
 };
 
 #[test]
@@ -5048,11 +5048,12 @@ fn test_shortcut_activation_through_single_instance_ipc_routes_to_coordinator() 
     let coord_for_listener = coordinator.clone();
     primary_ipc
         .start_listener(Box::new(move |command| {
-            let ActivationCommand::ActivateProfile(pid) = command;
-            let _ = coord_for_listener
-                .lock()
-                .unwrap()
-                .handle_shortcut_activation(&pid);
+            if let ActivationCommand::ActivateProfile(pid) = command {
+                let _ = coord_for_listener
+                    .lock()
+                    .unwrap()
+                    .handle_shortcut_activation(&pid);
+            }
         }))
         .expect("start listener");
 
@@ -5087,4 +5088,383 @@ fn test_shortcut_activation_through_single_instance_ipc_routes_to_coordinator() 
 
     // Still only 1 process launched! (reused)
     assert_eq!(launcher.launched_processes().len(), 1);
+}
+
+#[test]
+fn test_tray_provides_useful_status_summary_for_running_waiting_and_idle_states() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let monitor1 = MonitorDescriptor {
+        identity: MonitorIdentity::new(r"\\.\DISPLAY1\MONITOR1"),
+        name: "Monitor Antrian 1".to_string(),
+        is_primary: false,
+    };
+    let monitor2 = MonitorDescriptor {
+        identity: MonitorIdentity::new(r"\\.\DISPLAY2\MONITOR2"),
+        name: "Monitor Antrian 2".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![
+        monitor1.clone(),
+        monitor2.clone(),
+    ]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_tray_summary");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider.clone(),
+        launcher,
+        clock,
+        base_dir,
+    );
+    let mock_tray = Arc::new(MockTrayProvider::new());
+    coordinator.set_tray_provider(mock_tray.clone());
+
+    // 1. Initial idle state
+    let summary = coordinator.status_summary();
+    assert_eq!(summary.running_count, 0);
+    assert_eq!(summary.waiting_count, 0);
+    assert!(!summary.has_error);
+    assert!(summary.status_text.contains("Siap"));
+
+    // 2. Create profile 1 targeting monitor 1
+    let p1_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput {
+                name: "Antrian Poli Umum".to_string(),
+                browser_path: PathBuf::from(
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                ),
+                custom_parameters: "--app=https://antrian.poli/umum --kiosk".to_string(),
+                target_monitor: Some(monitor1.identity.clone()),
+            },
+        )
+        .expect("save profile 1");
+
+    // 3. Activate profile 1
+    coordinator
+        .activate_profile(&p1_id)
+        .expect("activate profile 1");
+    let summary1 = coordinator.status_summary();
+    assert_eq!(summary1.running_count, 1);
+    assert_eq!(summary1.waiting_count, 0);
+    assert!(!summary1.has_error);
+    assert!(summary1.status_text.contains("Antrian Poli Umum"));
+    assert!(summary1.tooltip.contains("Monitor Antrian 1"));
+
+    // Tray provider was updated automatically
+    let tray_status1 = mock_tray.last_status().expect("tray status 1");
+    assert_eq!(tray_status1.running_count, 1);
+    assert!(tray_status1.status_text.contains("Antrian Poli Umum"));
+
+    // 4. Create and activate profile 2 targeting monitor 2
+    let p2_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput {
+                name: "Antrian Poli Gigi".to_string(),
+                browser_path: PathBuf::from(
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                ),
+                custom_parameters: "--app=https://antrian.poli/gigi --kiosk".to_string(),
+                target_monitor: Some(monitor2.identity.clone()),
+            },
+        )
+        .expect("save profile 2");
+
+    coordinator
+        .activate_profile(&p2_id)
+        .expect("activate profile 2");
+    let summary2 = coordinator.status_summary();
+    assert_eq!(summary2.running_count, 2);
+    assert!(summary2.status_text.contains("2 profil berjalan"));
+
+    // 5. Disconnect monitor 1
+    monitor_provider.set_monitors(vec![monitor2.clone()]);
+    let transitions = coordinator
+        .handle_monitors_changed()
+        .expect("handle disconnect");
+    assert_eq!(transitions.len(), 1);
+
+    let summary3 = coordinator.status_summary();
+    assert_eq!(summary3.running_count, 1);
+    assert_eq!(summary3.waiting_count, 1);
+    assert!(summary3.status_text.contains("Antrian Poli Gigi"));
+
+    // 6. Disconnect monitor 2 as well
+    monitor_provider.set_monitors(vec![]);
+    coordinator
+        .handle_monitors_changed()
+        .expect("handle disconnect all");
+
+    let summary4 = coordinator.status_summary();
+    assert_eq!(summary4.running_count, 0);
+    assert_eq!(summary4.waiting_count, 2);
+    assert!(
+        summary4.status_text.contains("Monitor tujuan terputus")
+            || summary4.status_text.contains("Menunggu")
+    );
+}
+
+#[test]
+fn test_automatic_failure_updates_tray_status_without_popup_or_focus_theft() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let monitor = MonitorDescriptor {
+        identity: MonitorIdentity::new(r"\\.\DISPLAY1\MONITOR1"),
+        name: "Monitor Antrian".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![monitor.clone()]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_failure_status");
+
+    let mut coordinator =
+        LifecycleCoordinator::with_services(store, monitor_provider, launcher, clock, base_dir);
+    let mock_tray = Arc::new(MockTrayProvider::new());
+    coordinator.set_tray_provider(mock_tray.clone());
+
+    // Create profile with conflicting parameters that violate session isolation
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput {
+                name: "Antrian Konflik".to_string(),
+                browser_path: PathBuf::from(
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                ),
+                custom_parameters: "--user-data-dir=C:\\custom_dir".to_string(),
+                target_monitor: Some(monitor.identity.clone()),
+            },
+        )
+        .expect("save profile");
+
+    // Activate profile via shortcut handler
+    let res = coordinator.handle_shortcut_activation(&profile_id);
+    assert!(
+        res.is_err(),
+        "Activation must fail due to conflicting parameters"
+    );
+
+    // Verify coordinator error state
+    assert!(coordinator.last_error().is_some());
+    let err_msg = coordinator.last_error().unwrap().to_string();
+    assert!(err_msg.contains("berbenturan dengan isolasi sesi"));
+
+    // Verify tray status was updated automatically with error information without any popup
+    let tray_status = mock_tray.last_status().expect("tray status");
+    assert!(tray_status.has_error);
+    assert!(tray_status.status_text.starts_with("Kesalahan:"));
+    assert!(tray_status.tooltip.contains("Window Hop - Kesalahan:"));
+
+    // Clearing error restores clean tray status
+    coordinator.clear_error();
+    assert!(coordinator.last_error().is_none());
+    let clean_status = mock_tray.last_status().expect("clean tray status");
+    assert!(!clean_status.has_error);
+}
+
+#[test]
+fn test_shutdown_closes_all_managed_profiles_within_deadline_preserving_unmanaged_processes() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let monitor1 = MonitorDescriptor {
+        identity: MonitorIdentity::new(r"\\.\DISPLAY1\MONITOR1"),
+        name: "Monitor Antrian 1".to_string(),
+        is_primary: false,
+    };
+    let monitor2 = MonitorDescriptor {
+        identity: MonitorIdentity::new(r"\\.\DISPLAY2\MONITOR2"),
+        name: "Monitor Antrian 2".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![
+        monitor1.clone(),
+        monitor2.clone(),
+    ]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_shutdown_cleanup");
+
+    // Start unmanaged browser process (e.g. nurse's working Edge browser)
+    let nurse_plan = window_hop::browsers::LaunchPlan {
+        executable: PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+        arguments: vec!["--profile-directory=Default".to_string()],
+        user_data_dir: PathBuf::from(r"C:\Users\Nurse\AppData\Local\Microsoft\Edge\User Data"),
+        login_retention: window_hop::browsers::LoginRetentionNote::SessionIsolated {
+            explanation: "Nurse default session".to_string(),
+        },
+    };
+    let nurse_process = launcher
+        .launch(&nurse_plan, &monitor1)
+        .expect("launch nurse browser");
+    assert!(nurse_process.is_alive());
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+    let mock_tray = Arc::new(MockTrayProvider::new());
+    coordinator.set_tray_provider(mock_tray.clone());
+
+    // Create and activate Profile 1
+    let p1_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput {
+                name: "Poli Umum".to_string(),
+                browser_path: PathBuf::from(
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                ),
+                custom_parameters: "--app=https://antrian.poli/umum --kiosk".to_string(),
+                target_monitor: Some(monitor1.identity.clone()),
+            },
+        )
+        .expect("save p1");
+    coordinator.activate_profile(&p1_id).expect("activate p1");
+
+    // Create and activate Profile 2
+    let p2_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput {
+                name: "Poli Anak".to_string(),
+                browser_path: PathBuf::from(
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                ),
+                custom_parameters: "--app=https://antrian.poli/anak --kiosk".to_string(),
+                target_monitor: Some(monitor2.identity.clone()),
+            },
+        )
+        .expect("save p2");
+    coordinator.activate_profile(&p2_id).expect("activate p2");
+
+    assert_eq!(launcher.launched_processes().len(), 3);
+    let managed_proc1 = launcher.launched_processes()[1].clone();
+    let managed_proc2 = launcher.launched_processes()[2].clone();
+    assert!(managed_proc1.is_alive());
+    assert!(managed_proc2.is_alive());
+    assert!(nurse_process.is_alive());
+
+    // Perform shutdown from tray
+    let outcomes = coordinator.shutdown().expect("shutdown");
+    assert_eq!(outcomes.len(), 2);
+
+    // Both managed profiles are stopped gracefully
+    assert!(!managed_proc1.is_alive());
+    assert!(!managed_proc2.is_alive());
+    assert!(managed_proc1.close_requested());
+    assert!(managed_proc2.close_requested());
+
+    // Coordinator reports no profiles running
+    assert!(!coordinator.is_profile_running(&p1_id));
+    assert!(!coordinator.is_profile_running(&p2_id));
+
+    // The nurse's working browser is COMPLETELY UNTOUCHED and still alive!
+    assert!(
+        nurse_process.is_alive(),
+        "Nurse's working browser must remain alive and untouched"
+    );
+
+    // Tray was removed
+    assert!(mock_tray.is_removed());
+}
+
+#[test]
+fn test_shutdown_handles_unresponsive_browser_with_3s_deadline_force_stop() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let monitor = MonitorDescriptor {
+        identity: MonitorIdentity::new(r"\\.\DISPLAY1\MONITOR1"),
+        name: "Monitor Antrian".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![monitor.clone()]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_shutdown_unresponsive");
+
+    // Nurse working browser
+    let nurse_plan = window_hop::browsers::LaunchPlan {
+        executable: PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+        arguments: vec!["--profile-directory=Default".to_string()],
+        user_data_dir: PathBuf::from(r"C:\Users\Nurse\AppData\Local\Microsoft\Edge\User Data"),
+        login_retention: window_hop::browsers::LoginRetentionNote::SessionIsolated {
+            explanation: "Nurse default session".to_string(),
+        },
+    };
+    let nurse_process = launcher
+        .launch(&nurse_plan, &monitor)
+        .expect("launch nurse browser");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock.clone(),
+        base_dir,
+    );
+    let mock_tray = Arc::new(MockTrayProvider::new());
+    coordinator.set_tray_provider(mock_tray.clone());
+
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput {
+                name: "Antrian Macet".to_string(),
+                browser_path: PathBuf::from(
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                ),
+                custom_parameters: "--app=https://antrian.poli/macet --kiosk".to_string(),
+                target_monitor: Some(monitor.identity.clone()),
+            },
+        )
+        .expect("save profile");
+
+    let act = coordinator.activate_profile(&profile_id).expect("activate");
+    let queue_pid = match act {
+        ActivationResult::Launched { pid, .. } => pid,
+        _ => panic!("expected Launched"),
+    };
+
+    let queue_proc = launcher.launched_processes()[1].clone();
+    queue_proc.set_refuse_graceful(true);
+
+    let t0 = clock.now();
+    let outcomes = coordinator.shutdown().expect("shutdown");
+    let t1 = clock.now();
+
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(
+        outcomes[0],
+        (profile_id.clone(), StopOutcome::Forced { pid: queue_pid })
+    );
+    assert!(
+        t1.duration_since(t0) >= std::time::Duration::from_secs(3),
+        "Shutdown must wait for 3s deadline before force stopping unresponsive instance"
+    );
+
+    assert!(queue_proc.close_requested());
+    assert!(queue_proc.force_stopped());
+    assert!(!queue_proc.is_alive());
+    assert!(!coordinator.is_profile_running(&profile_id));
+
+    // Nurse process remains alive
+    assert!(nurse_process.is_alive(), "Nurse browser must remain alive");
+    assert!(mock_tray.is_removed());
+}
+
+#[test]
+fn test_shutdown_when_idle_succeeds_cleanly() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let mut coordinator = LifecycleCoordinator::from_store(store);
+    let mock_tray = Arc::new(MockTrayProvider::new());
+    coordinator.set_tray_provider(mock_tray.clone());
+
+    let outcomes = coordinator.shutdown().expect("shutdown");
+    assert!(outcomes.is_empty());
+    assert!(mock_tray.is_removed());
 }

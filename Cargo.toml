@@ -6,6 +6,7 @@ authors = ["Window Hop Contributors"]
 description = "Window Hop multi-display queue browser manager"
 
 [dependencies]
+async-channel = "2.5"
 gpui-kit = "0.8.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -20,4 +21,5 @@ windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
 ] }

@@ -4,12 +4,13 @@ use crate::browsers::{BrowserError, LoginRetentionNote};
 use crate::domain::{
     AppConfig, DraftProfileInput, ExitReason, MonitorDescriptor, MonitorIdentity, ProcessId,
     Profile, ProfileId, ProfileLifecycleState, ProfileStatus, TargetMonitorStatus,
+    TrayStatusSummary,
 };
 use crate::persistence::{PersistenceError, ProfileStore};
 use crate::platform::{
     default_clock, default_monitor_provider, default_process_launcher, default_shortcut_creator,
-    Clock, ManagedProcess, MonitorProvider, PlatformError, ProcessLauncher, ShortcutCreator,
-    ShortcutSpec, ACTIVATE_PROFILE_FLAG,
+    default_tray_provider, Clock, ManagedProcess, MonitorProvider, PlatformError, ProcessLauncher,
+    ShortcutCreator, ShortcutSpec, TrayProvider, ACTIVATE_PROFILE_FLAG,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -164,6 +165,7 @@ pub struct LifecycleCoordinator {
     process_launcher: Arc<dyn ProcessLauncher>,
     clock: Arc<dyn Clock>,
     shortcut_creator: Arc<dyn ShortcutCreator>,
+    tray_provider: Arc<dyn TrayProvider>,
     base_data_dir: PathBuf,
     config: AppConfig,
     active_instances: HashMap<ProfileId, ActiveProfileInstance>,
@@ -187,6 +189,7 @@ impl LifecycleCoordinator {
             process_launcher,
             clock,
             shortcut_creator: default_shortcut_creator(),
+            tray_provider: default_tray_provider(),
             base_data_dir,
             config: AppConfig::default(),
             active_instances: HashMap::new(),
@@ -433,6 +436,110 @@ impl LifecycleCoordinator {
         &self.shortcut_creator
     }
 
+    /// Mengatur penyedia system tray platform.
+    pub fn set_tray_provider(&mut self, tray_provider: Arc<dyn TrayProvider>) {
+        self.tray_provider = tray_provider;
+    }
+
+    /// Mengambil referensi penyedia system tray.
+    pub fn tray_provider(&self) -> &Arc<dyn TrayProvider> {
+        &self.tray_provider
+    }
+
+    /// Memperbarui status system tray dengan ringkasan status terkini koordinator.
+    pub fn update_tray_status(&self) -> Result<(), ApplicationError> {
+        let summary = self.status_summary();
+        self.tray_provider
+            .update_status(&summary)
+            .map_err(ApplicationError::Platform)
+    }
+
+    /// Menghasilkan ringkasan status keseluruhan Window Hop untuk ditampilkan pada system tray.
+    ///
+    /// Menampilkan jumlah profil yang sedang berjalan, profil yang menunggu monitor tujuan,
+    /// atau kesalahan otomatis tanpa popup atau merebut fokus.
+    pub fn status_summary(&self) -> TrayStatusSummary {
+        let running_profiles: Vec<(&ProfileId, &ActiveProfileInstance)> = self
+            .active_instances
+            .iter()
+            .filter(|(_, inst)| inst.process.is_alive())
+            .collect();
+        let running_count = running_profiles.len();
+
+        let mut waiting_count = 0;
+        let mut disconnected_count = 0;
+        for state in self.lifecycle_states.values() {
+            match state {
+                ProfileLifecycleState::WaitingForMonitor { .. } => waiting_count += 1,
+                ProfileLifecycleState::Disconnected { .. } => disconnected_count += 1,
+                _ => {}
+            }
+        }
+
+        let has_error = self.last_error.is_some();
+        let last_error = self.last_error.clone();
+
+        let (status_text, tooltip) = if let Some(ref err) = self.last_error {
+            let short_err = if err.chars().count() > 60 {
+                format!("{}...", err.chars().take(57).collect::<String>())
+            } else {
+                err.clone()
+            };
+            (
+                format!("Kesalahan: {}", short_err),
+                format!("Window Hop - Kesalahan: {}", err),
+            )
+        } else if running_count > 0 {
+            if running_count == 1 {
+                let (pid, inst) = running_profiles[0];
+                let name = self.get_profile(pid).map(|p| p.name()).unwrap_or("Profil");
+                (
+                    format!("Profil '{}' berjalan", name),
+                    format!(
+                        "Window Hop\nProfil '{}' berjalan di monitor '{}'",
+                        name, inst.target_monitor.name
+                    ),
+                )
+            } else {
+                (
+                    format!("{} profil berjalan", running_count),
+                    format!("Window Hop\n{} profil aktif berjalan", running_count),
+                )
+            }
+        } else if waiting_count > 0 {
+            (
+                "Menunggu monitor tujuan".to_string(),
+                "Window Hop\nMenunggu monitor tujuan tersambung".to_string(),
+            )
+        } else if disconnected_count > 0 {
+            (
+                "Monitor tujuan terputus".to_string(),
+                "Window Hop\nMonitor tujuan terputus".to_string(),
+            )
+        } else {
+            (
+                "Siap (tidak ada profil aktif)".to_string(),
+                "Window Hop - Siap".to_string(),
+            )
+        };
+
+        // Pastikan tooltip tidak melebihi batas 120 karakter untuk keamanan notifikasi tray Win32
+        let safe_tooltip = if tooltip.chars().count() > 120 {
+            format!("{}...", tooltip.chars().take(117).collect::<String>())
+        } else {
+            tooltip
+        };
+
+        TrayStatusSummary {
+            status_text,
+            tooltip: safe_tooltip,
+            running_count,
+            waiting_count: waiting_count + disconnected_count,
+            has_error,
+            last_error,
+        }
+    }
+
     /// Membuat shortcut untuk profil tersimpan ke folder target (default Desktop jika None).
     pub fn create_profile_shortcut(
         &self,
@@ -499,10 +606,12 @@ impl LifecycleCoordinator {
         match self.activate_profile(id) {
             Ok(result) => {
                 self.last_error = None;
+                let _ = self.update_tray_status();
                 Ok(result)
             }
             Err(err) => {
                 self.last_error = Some(err.to_string());
+                let _ = self.update_tray_status();
                 Err(err)
             }
         }
@@ -692,6 +801,7 @@ impl LifecycleCoordinator {
                         target_monitor: recorded_identity.clone(),
                     },
                 );
+                let _ = self.update_tray_status();
                 return Ok(ActivationResult::WaitingForMonitor {
                     target_monitor: recorded_identity,
                 });
@@ -724,6 +834,7 @@ impl LifecycleCoordinator {
                             target_monitor: target_desc.clone(),
                         },
                     );
+                    let _ = self.update_tray_status();
                     return Ok(ActivationResult::Reused {
                         pid: existing.process.pid(),
                         target_monitor: target_desc,
@@ -770,6 +881,7 @@ impl LifecycleCoordinator {
         }
 
         let (pid, login_retention) = self.launch_profile_instance(&profile, &target_desc)?;
+        let _ = self.update_tray_status();
 
         Ok(ActivationResult::Launched {
             pid,
@@ -881,6 +993,7 @@ impl LifecycleCoordinator {
         self.active_instances.remove(id);
         self.lifecycle_states.remove(id);
         self.last_error = None;
+        let _ = self.update_tray_status();
         Ok(stop_outcome)
     }
 
@@ -1071,6 +1184,7 @@ impl LifecycleCoordinator {
             }
         }
 
+        let _ = self.update_tray_status();
         Ok(transitions)
     }
 
@@ -1199,6 +1313,7 @@ impl LifecycleCoordinator {
             Ok(outcome) => {
                 self.lifecycle_states
                     .insert(id.clone(), ProfileLifecycleState::Idle);
+                let _ = self.update_tray_status();
                 Ok(outcome)
             }
             Err(err) => {
@@ -1218,9 +1333,44 @@ impl LifecycleCoordinator {
                         .insert(id.clone(), ProfileLifecycleState::Idle);
                 }
                 self.last_error = Some(err.to_string());
+                let _ = self.update_tray_status();
                 Err(err)
             }
         }
+    }
+
+    /// Menghentikan seluruh instance browser yang dikelola sebelum aplikasi keluar.
+    ///
+    /// Aturan:
+    /// - Mengirimkan permintaan penutupan normal (graceful close) ke setiap instance aktif.
+    /// - Menunggu hingga proses berhenti dengan batas tenggat 3 detik.
+    /// - Jika belum berhenti setelah 3 detik, menghentikan paksa (force stop) hanya instance
+    ///   milik profil yang terverifikasi.
+    /// - Browser kerja perawat dan proses di luar kepemilikan terverifikasi tidak disentuh sama sekali.
+    /// - Membersihkan seluruh instance aktif dan mengatur status menjadi Idle.
+    /// - Menghapus ikon tray sebelum aplikasi berhenti.
+    pub fn shutdown(&mut self) -> Result<Vec<(ProfileId, StopOutcome)>, ApplicationError> {
+        let active_keys: Vec<ProfileId> = self.active_instances.keys().cloned().collect();
+        let mut outcomes = Vec::new();
+
+        for pid in active_keys {
+            match self.stop_profile(&pid) {
+                Ok(outcome) => {
+                    outcomes.push((pid, outcome));
+                }
+                Err(err) => {
+                    self.last_error = Some(err.to_string());
+                    let _ = self.update_tray_status();
+                    return Err(err);
+                }
+            }
+        }
+
+        self.active_instances.clear();
+        let _ = self.update_tray_status();
+        let _ = self.tray_provider.remove_tray();
+
+        Ok(outcomes)
     }
 
     /// Menangani keluarnya proses browser yang dikelola.
@@ -1255,6 +1405,8 @@ impl LifecycleCoordinator {
         self.lifecycle_states
             .insert(profile_id.clone(), ProfileLifecycleState::Exited { reason });
 
+        let _ = self.update_tray_status();
+
         Some(LifecycleTransitionOutcome::Exited {
             profile_id,
             pid,
@@ -1270,6 +1422,7 @@ impl LifecycleCoordinator {
     /// Membersihkan status pesan error.
     pub fn clear_error(&mut self) {
         self.last_error = None;
+        let _ = self.update_tray_status();
     }
 
     /// Mengambil konfigurasi penuh saat ini.
