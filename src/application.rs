@@ -118,6 +118,14 @@ pub enum ApplicationError {
 
     #[error("Penyimpanan dicegah karena data konfigurasi sebelumnya rusak atau gagal dimuat: {0}")]
     BlockedByCorruptState(String),
+
+    #[error("Gagal mengganti profil aktif pada monitor '{target_monitor}': profil sebelumnya '{previous_profile_name}' gagal dihentikan: {reason}")]
+    SwitchProfileFailed {
+        previous_profile_id: ProfileId,
+        previous_profile_name: String,
+        target_monitor: MonitorIdentity,
+        reason: String,
+    },
 }
 
 /// Mengembalikan lokasi direktori dasar data sesi Window Hop.
@@ -625,6 +633,37 @@ impl LifecycleCoordinator {
             }
         }
 
+        // Eksklusivitas per-monitor: Hanya satu profil aktif menguasai satu monitor tujuan.
+        // Jika ada profil lain yang sedang berjalan pada monitor tujuan yang sama,
+        // hentikan profil lama tersebut terlebih dahulu secara berurutan sebelum meluncurkan profil baru.
+        let conflicting_active_profiles: Vec<ProfileId> = self
+            .active_instances
+            .iter()
+            .filter(|(other_id, inst)| {
+                *other_id != id
+                    && inst.target_monitor.identity == target_desc.identity
+                    && inst.process.is_alive()
+            })
+            .map(|(other_id, _)| other_id.clone())
+            .collect();
+
+        for other_id in conflicting_active_profiles {
+            if let Err(err) = self.stop_profile(&other_id) {
+                let prev_name = self
+                    .get_profile(&other_id)
+                    .map(|p| p.name().to_string())
+                    .unwrap_or_else(|| other_id.to_string());
+                let switch_err = ApplicationError::SwitchProfileFailed {
+                    previous_profile_id: other_id,
+                    previous_profile_name: prev_name,
+                    target_monitor: target_desc.identity.clone(),
+                    reason: err.to_string(),
+                };
+                self.last_error = Some(switch_err.to_string());
+                return Err(switch_err);
+            }
+        }
+
         let (pid, login_retention) = self.launch_profile_instance(&profile, &target_desc)?;
 
         Ok(ActivationResult::Launched {
@@ -853,6 +892,13 @@ impl LifecycleCoordinator {
                 .process
                 .force_stop()
                 .map_err(ApplicationError::Platform)?;
+            if instance.process.is_alive() {
+                return Err(ApplicationError::Platform(PlatformError::Os(format!(
+                    "Gagal menghentikan proses {} (PID: {}) setelah batas waktu 3 detik",
+                    pid,
+                    pid.as_u32()
+                ))));
+            }
             Ok(StopOutcome::Forced { pid })
         }
     }
@@ -863,6 +909,25 @@ impl LifecycleCoordinator {
             .get(id)
             .map(|inst| inst.process.is_alive())
             .unwrap_or(false)
+    }
+
+    /// Menemukan profil lain yang saat ini sedang aktif berjalan pada monitor tertentu.
+    pub fn find_conflicting_active_profile(
+        &self,
+        exclude_id: Option<&ProfileId>,
+        monitor_id: &MonitorIdentity,
+    ) -> Option<&Profile> {
+        let active_profile_id = self.active_instances.iter().find_map(|(id, inst)| {
+            if exclude_id != Some(id)
+                && &inst.target_monitor.identity == monitor_id
+                && inst.process.is_alive()
+            {
+                Some(id)
+            } else {
+                None
+            }
+        })?;
+        self.get_profile(active_profile_id)
     }
 
     /// Mengambil referensi ke instance proses yang sedang aktif untuk profil tertentu (jika ada).
@@ -880,21 +945,49 @@ impl LifecycleCoordinator {
     /// - Jika belum berhenti setelah 3 detik, menghentikan paksa (force stop) hanya instance milik profil yang terverifikasi.
     /// - Proses lain (termasuk browser kerja perawat) tidak disentuh sama sekali.
     pub fn stop_profile(&mut self, id: &ProfileId) -> Result<StopOutcome, ApplicationError> {
-        self.lifecycle_states
-            .insert(id.clone(), ProfileLifecycleState::Idle);
-
-        let instance = match self.active_instances.remove(id) {
+        let mut instance = match self.active_instances.remove(id) {
             Some(mut inst) => {
                 if !inst.process.is_alive() {
+                    self.lifecycle_states
+                        .insert(id.clone(), ProfileLifecycleState::Idle);
                     return Ok(StopOutcome::NotRunning);
                 }
                 inst.stopping = true;
                 inst
             }
-            None => return Ok(StopOutcome::NotRunning),
+            None => {
+                self.lifecycle_states
+                    .insert(id.clone(), ProfileLifecycleState::Idle);
+                return Ok(StopOutcome::NotRunning);
+            }
         };
 
-        Self::stop_active_instance_with_deadline(&self.clock, &instance)
+        match Self::stop_active_instance_with_deadline(&self.clock, &instance) {
+            Ok(outcome) => {
+                self.lifecycle_states
+                    .insert(id.clone(), ProfileLifecycleState::Idle);
+                Ok(outcome)
+            }
+            Err(err) => {
+                // Jika gagal menghentikan dan proses masih hidup, pulihkan status instance dan running state
+                if instance.process.is_alive() {
+                    instance.stopping = false;
+                    self.lifecycle_states.insert(
+                        id.clone(),
+                        ProfileLifecycleState::Running {
+                            pid: instance.process.pid(),
+                            target_monitor: instance.target_monitor.clone(),
+                        },
+                    );
+                    self.active_instances.insert(id.clone(), instance);
+                } else {
+                    self.lifecycle_states
+                        .insert(id.clone(), ProfileLifecycleState::Idle);
+                }
+                self.last_error = Some(err.to_string());
+                Err(err)
+            }
+        }
     }
 
     /// Menangani keluarnya proses browser yang dikelola.
