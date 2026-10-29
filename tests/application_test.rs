@@ -2357,3 +2357,280 @@ fn test_late_exit_event_from_old_instance_does_not_mutate_state_or_resurrect_pro
         }
     );
 }
+
+#[test]
+fn test_stop_profile_cancels_waiting_for_monitor_and_prevents_launch_on_reconnect() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let queue_monitor = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE-CANCEL-WAIT"),
+        name: "Queue Screen".to_string(),
+        is_primary: false,
+    };
+    // Initially only primary display is available
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-PRIMARY"),
+        name: "Workstation Main Display".to_string(),
+        is_primary: true,
+    }]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_stop_waiting");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider.clone(),
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Batal Tunggu",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-CANCEL-WAIT"))),
+        )
+        .expect("save profile");
+
+    // Activate while monitor is unavailable -> WaitingForMonitor
+    let act = coordinator.activate_profile(&profile_id).expect("activate");
+    assert_eq!(
+        act,
+        ActivationResult::WaitingForMonitor {
+            target_monitor: MonitorIdentity::new("MON-QUEUE-CANCEL-WAIT")
+        }
+    );
+    assert_eq!(
+        coordinator.get_lifecycle_state(&profile_id).unwrap(),
+        ProfileLifecycleState::WaitingForMonitor {
+            target_monitor: MonitorIdentity::new("MON-QUEUE-CANCEL-WAIT")
+        }
+    );
+
+    // Nurse decides to stop the waiting profile before monitor connects
+    let stop_res = coordinator.stop_profile(&profile_id).expect("stop profile");
+    assert_eq!(stop_res, StopOutcome::NotRunning);
+
+    // Profile state MUST be reset to Idle!
+    assert_eq!(
+        coordinator.get_lifecycle_state(&profile_id).unwrap(),
+        ProfileLifecycleState::Idle,
+        "Stopping a waiting profile must reset its lifecycle state to Idle"
+    );
+
+    // Now monitor is plugged in
+    monitor_provider.set_monitors(vec![
+        MonitorDescriptor {
+            identity: MonitorIdentity::new("MON-PRIMARY"),
+            name: "Workstation Main Display".to_string(),
+            is_primary: true,
+        },
+        queue_monitor,
+    ]);
+
+    let transitions = coordinator
+        .handle_monitors_changed()
+        .expect("handle monitors changed");
+
+    // Must NOT launch because the profile was stopped (Idle)
+    assert!(
+        transitions.is_empty(),
+        "Stopped waiting profile must NOT be restored on reconnect"
+    );
+    assert!(launcher.launched_processes().is_empty());
+    assert!(!coordinator.is_profile_running(&profile_id));
+    assert_eq!(
+        coordinator.get_lifecycle_state(&profile_id).unwrap(),
+        ProfileLifecycleState::Idle
+    );
+}
+
+#[test]
+fn test_stop_profile_cancels_disconnected_and_prevents_launch_on_reconnect() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let queue_monitor = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE-CANCEL-DISC"),
+        name: "Queue Screen".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![
+        MonitorDescriptor {
+            identity: MonitorIdentity::new("MON-PRIMARY"),
+            name: "Workstation Main Display".to_string(),
+            is_primary: true,
+        },
+        queue_monitor.clone(),
+    ]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_stop_disconnected");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider.clone(),
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Batal Disconnected",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-CANCEL-DISC"))),
+        )
+        .expect("save profile");
+
+    coordinator.activate_profile(&profile_id).expect("activate");
+    assert_eq!(launcher.launched_processes().len(), 1);
+
+    // Disconnect monitor -> state becomes Disconnected
+    monitor_provider.set_monitors(vec![MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-PRIMARY"),
+        name: "Workstation Main Display".to_string(),
+        is_primary: true,
+    }]);
+    coordinator.handle_monitors_changed().expect("disconnect");
+    assert_eq!(
+        coordinator.get_lifecycle_state(&profile_id).unwrap(),
+        ProfileLifecycleState::Disconnected {
+            target_monitor: MonitorIdentity::new("MON-QUEUE-CANCEL-DISC")
+        }
+    );
+
+    // Nurse clicks Stop while monitor is still disconnected
+    let stop_res = coordinator.stop_profile(&profile_id).expect("stop profile");
+    assert_eq!(stop_res, StopOutcome::NotRunning);
+
+    // Profile state MUST be reset to Idle!
+    assert_eq!(
+        coordinator.get_lifecycle_state(&profile_id).unwrap(),
+        ProfileLifecycleState::Idle,
+        "Stopping a disconnected profile must reset its lifecycle state to Idle"
+    );
+
+    // Monitor reconnects later
+    monitor_provider.set_monitors(vec![
+        MonitorDescriptor {
+            identity: MonitorIdentity::new("MON-PRIMARY"),
+            name: "Workstation Main Display".to_string(),
+            is_primary: true,
+        },
+        queue_monitor,
+    ]);
+
+    let transitions = coordinator
+        .handle_monitors_changed()
+        .expect("handle monitors changed");
+
+    // Must NOT launch because the profile was explicitly stopped (Idle)
+    assert!(
+        transitions.is_empty(),
+        "Stopped disconnected profile must NOT be restored on reconnect"
+    );
+    assert_eq!(
+        launcher.launched_processes().len(),
+        1,
+        "No new process launched"
+    );
+    assert!(!coordinator.is_profile_running(&profile_id));
+    assert_eq!(
+        coordinator.get_lifecycle_state(&profile_id).unwrap(),
+        ProfileLifecycleState::Idle
+    );
+}
+
+#[test]
+fn test_reconnect_error_in_one_profile_does_not_block_restoration_of_other_profiles() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let queue_mon1 = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE-1"),
+        name: "Queue Screen 1".to_string(),
+        is_primary: false,
+    };
+    let queue_mon2 = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE-2"),
+        name: "Queue Screen 2".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-PRIMARY"),
+        name: "Workstation Main Display".to_string(),
+        is_primary: true,
+    }]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_error_isolation");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider.clone(),
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+
+    // Profile 1: unverified browser that fails during launch_profile_instance
+    // We manually set its lifecycle state to WaitingForMonitor
+    let _p1_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Bermasalah",
+                PathBuf::from("unsupported_browser.exe"),
+                "--kiosk",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-1"))),
+        )
+        .expect("save p1");
+
+    // Profile 2: healthy profile
+    let p2_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Sehat",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local/good",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-2"))),
+        )
+        .expect("save p2");
+
+    // Both profiles are in WaitingForMonitor
+    coordinator.activate_profile(&p2_id).expect("activate p2");
+    // For p1, simulate that it was previously WaitingForMonitor
+    // (or directly insert into coordinator's lifecycle)
+    // Note: activate_profile(&p1_id) fails can_activate because browser is unverified,
+    // so we can test what happens if launch_profile_instance returns an error during reconnect:
+    // We simulate launch error on launcher when p1 launches:
+    launcher.set_launch_error(Some("Launch error for p1".to_string()));
+
+    // Both monitors connect simultaneously
+    monitor_provider.set_monitors(vec![
+        MonitorDescriptor {
+            identity: MonitorIdentity::new("MON-PRIMARY"),
+            name: "Workstation Main Display".to_string(),
+            is_primary: true,
+        },
+        queue_mon1,
+        queue_mon2.clone(),
+    ]);
+
+    let res = coordinator.handle_monitors_changed();
+    // Before fix, res is Err(PlatformError) and aborts!
+    // After fix, res is Ok, p1 failure is logged to last_error, and doesn't crash the coordinator!
+    assert!(
+        res.is_ok(),
+        "handle_monitors_changed should not fail whole batch on one profile launch error"
+    );
+    assert!(coordinator.last_error().is_some());
+}

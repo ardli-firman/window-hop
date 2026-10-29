@@ -798,12 +798,18 @@ impl LifecycleCoordinator {
                     let eval =
                         TargetMonitorStatus::evaluate(Some(&target_monitor), available_monitors);
                     if let TargetMonitorStatus::Available(desc) = eval {
-                        let (launched_pid, _) = self.launch_profile_instance(&profile, &desc)?;
-                        transitions.push(LifecycleTransitionOutcome::Restored {
-                            profile_id: pid,
-                            pid: launched_pid,
-                            target_monitor: desc,
-                        });
+                        match self.launch_profile_instance(&profile, &desc) {
+                            Ok((launched_pid, _)) => {
+                                transitions.push(LifecycleTransitionOutcome::Restored {
+                                    profile_id: pid,
+                                    pid: launched_pid,
+                                    target_monitor: desc,
+                                });
+                            }
+                            Err(err) => {
+                                self.last_error = Some(err.to_string());
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -874,6 +880,9 @@ impl LifecycleCoordinator {
     /// - Jika belum berhenti setelah 3 detik, menghentikan paksa (force stop) hanya instance milik profil yang terverifikasi.
     /// - Proses lain (termasuk browser kerja perawat) tidak disentuh sama sekali.
     pub fn stop_profile(&mut self, id: &ProfileId) -> Result<StopOutcome, ApplicationError> {
+        self.lifecycle_states
+            .insert(id.clone(), ProfileLifecycleState::Idle);
+
         let instance = match self.active_instances.remove(id) {
             Some(mut inst) => {
                 if !inst.process.is_alive() {
@@ -885,10 +894,7 @@ impl LifecycleCoordinator {
             None => return Ok(StopOutcome::NotRunning),
         };
 
-        let outcome = Self::stop_active_instance_with_deadline(&self.clock, &instance)?;
-        self.lifecycle_states
-            .insert(id.clone(), ProfileLifecycleState::Idle);
-        Ok(outcome)
+        Self::stop_active_instance_with_deadline(&self.clock, &instance)
     }
 
     /// Menangani keluarnya proses browser yang dikelola.
