@@ -131,3 +131,37 @@ fn test_profile_evaluate_status_ambiguous_when_multiple_monitors_share_identity(
         ProfileStatus::TargetAmbiguous
     );
 }
+
+#[test]
+fn test_target_monitor_status_evaluate_pure_function() {
+    let monitors = vec![MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-ABC"),
+        name: "LG Display".to_string(),
+        is_primary: false,
+    }];
+
+    // Unset when target identity is None
+    assert_eq!(
+        TargetMonitorStatus::evaluate(None, &monitors),
+        TargetMonitorStatus::Unset
+    );
+
+    // Available when target identity matches uniquely
+    let target = MonitorIdentity::new("MON-ABC");
+    match TargetMonitorStatus::evaluate(Some(&target), &monitors) {
+        TargetMonitorStatus::Available(desc) => {
+            assert_eq!(desc.identity, target);
+            assert_eq!(desc.name, "LG Display");
+        }
+        other => panic!("expected Available status, got {:?}", other),
+    }
+
+    // Unavailable when target identity is not found
+    let missing = MonitorIdentity::new("MON-MISSING");
+    assert_eq!(
+        TargetMonitorStatus::evaluate(Some(&missing), &monitors),
+        TargetMonitorStatus::Unavailable {
+            recorded_identity: missing
+        }
+    );
+}

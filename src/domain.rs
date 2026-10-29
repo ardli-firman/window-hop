@@ -80,6 +80,34 @@ pub enum TargetMonitorStatus {
     },
 }
 
+impl TargetMonitorStatus {
+    /// Mengevaluasi status kecocokan monitor tujuan terhadap daftar monitor yang tersedia saat ini.
+    pub fn evaluate(
+        target_monitor: Option<&MonitorIdentity>,
+        available_monitors: &[MonitorDescriptor],
+    ) -> Self {
+        let Some(target_id) = target_monitor else {
+            return Self::Unset;
+        };
+
+        let matches: Vec<&MonitorDescriptor> = available_monitors
+            .iter()
+            .filter(|m| &m.identity == target_id)
+            .collect();
+
+        match matches.len() {
+            0 => Self::Unavailable {
+                recorded_identity: target_id.clone(),
+            },
+            1 => Self::Available((*matches[0]).clone()),
+            count => Self::Ambiguous {
+                recorded_identity: target_id.clone(),
+                match_count: count,
+            },
+        }
+    }
+}
+
 impl fmt::Display for TargetMonitorStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -226,25 +254,7 @@ impl Profile {
         &self,
         available_monitors: &[MonitorDescriptor],
     ) -> TargetMonitorStatus {
-        let Some(ref target_id) = self.target_monitor else {
-            return TargetMonitorStatus::Unset;
-        };
-
-        let matches: Vec<&MonitorDescriptor> = available_monitors
-            .iter()
-            .filter(|m| &m.identity == target_id)
-            .collect();
-
-        match matches.len() {
-            0 => TargetMonitorStatus::Unavailable {
-                recorded_identity: target_id.clone(),
-            },
-            1 => TargetMonitorStatus::Available((*matches[0]).clone()),
-            count => TargetMonitorStatus::Ambiguous {
-                recorded_identity: target_id.clone(),
-                match_count: count,
-            },
-        }
+        TargetMonitorStatus::evaluate(self.target_monitor.as_ref(), available_monitors)
     }
 
     /// Mengevaluasi status kesiapan profil berdasarkan ketersediaan monitor tujuan saat ini.

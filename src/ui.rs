@@ -10,7 +10,7 @@ use gpui_kit::*;
 
 use crate::application::LifecycleCoordinator;
 use crate::domain::{
-    DraftProfileInput, MonitorDescriptor, MonitorIdentity, Profile, ProfileId, ProfileStatus,
+    DraftProfileInput, MonitorDescriptor, MonitorIdentity, ProfileId, ProfileStatus,
     TargetMonitorStatus,
 };
 
@@ -655,19 +655,10 @@ impl Render for WindowHopView {
                             )
                             // Keterangan Status Kesiapan
                             .child({
-                                let target_eval = match &self.selected_target_monitor {
-                                    None => TargetMonitorStatus::Unset,
-                                    Some(target_id) => {
-                                        let mut dummy_profile = Profile::new_draft(
-                                            ProfileId::new("dummy"),
-                                            "",
-                                            PathBuf::new(),
-                                            "",
-                                        );
-                                        dummy_profile.set_target_monitor(Some(target_id.clone()));
-                                        dummy_profile.evaluate_target_monitor(available_monitors)
-                                    }
-                                };
+                                let target_eval = TargetMonitorStatus::evaluate(
+                                    self.selected_target_monitor.as_ref(),
+                                    available_monitors,
+                                );
 
                                 let (status_text, status_color, status_bg) = match target_eval {
                                     TargetMonitorStatus::Unset => (
