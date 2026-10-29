@@ -980,6 +980,9 @@ impl LifecycleCoordinator {
                         },
                     );
                     self.active_instances.insert(id.clone(), instance);
+                } else {
+                    self.lifecycle_states
+                        .insert(id.clone(), ProfileLifecycleState::Idle);
                 }
                 self.last_error = Some(err.to_string());
                 Err(err)

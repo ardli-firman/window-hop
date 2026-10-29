@@ -1,3 +1,4 @@
+use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 use std::sync::Arc;
 use window_hop::application::LifecycleCoordinator;
@@ -15,13 +16,14 @@ fn main() {
         let options = WindowOptions {
             titlebar: Some(TitlebarOptions {
                 title: Some("Window Hop".into()),
-                ..Default::default()
+                ..TitleBar::title_bar_options()
             }),
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,
                 size(px(900.0), px(600.0)),
                 cx,
             ))),
+            app_owns_titlebar_drag: true,
             ..Default::default()
         };
 

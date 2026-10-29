@@ -1,23 +1,28 @@
 //! GPUI presentation for Window Hop profile management.
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable as _, TitleBar};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::application::{ActivationResult, LifecycleCoordinator, StopOutcome};
 use crate::domain::{
-    DraftProfileInput, ExitReason, MonitorDescriptor, MonitorIdentity, ProfileId,
+    DraftProfileInput, ExitReason, MonitorDescriptor, MonitorIdentity, Profile, ProfileId,
     ProfileLifecycleState, ProfileStatus, TargetMonitorStatus,
 };
 
 /// Tampilan utama pengaturan profil Window Hop.
 pub struct WindowHopView {
     coordinator: Arc<Mutex<LifecycleCoordinator>>,
+    cached_profiles: Vec<Profile>,
+    cached_lifecycle_states: HashMap<ProfileId, ProfileLifecycleState>,
+    cached_running_ids: HashSet<ProfileId>,
+    is_busy: bool,
     selected_profile_id: Option<ProfileId>,
     selected_target_monitor: Option<MonitorIdentity>,
     cached_monitors: Vec<MonitorDescriptor>,
@@ -56,8 +61,30 @@ impl WindowHopView {
             Err(e) => (Vec::new(), Some(e.to_string())),
         };
 
+        let cached_profiles = coordinator.list_profiles();
+        let cached_lifecycle_states = cached_profiles
+            .iter()
+            .map(|p| {
+                (
+                    p.id().clone(),
+                    coordinator
+                        .get_lifecycle_state(p.id())
+                        .unwrap_or(ProfileLifecycleState::Idle),
+                )
+            })
+            .collect();
+        let cached_running_ids = cached_profiles
+            .iter()
+            .filter(|p| coordinator.is_profile_running(p.id()))
+            .map(|p| p.id().clone())
+            .collect();
+
         Self {
             coordinator: Arc::new(Mutex::new(coordinator)),
+            cached_profiles,
+            cached_lifecycle_states,
+            cached_running_ids,
+            is_busy: false,
             selected_profile_id: None,
             selected_target_monitor: None,
             cached_monitors,
@@ -71,18 +98,44 @@ impl WindowHopView {
         }
     }
 
+    /// Menyinkronkan cache tampilan lokal dari instance koordinator.
+    fn sync_cache_from_coordinator(&mut self, coord: &LifecycleCoordinator) {
+        self.cached_profiles = coord.list_profiles();
+        self.cached_lifecycle_states = self
+            .cached_profiles
+            .iter()
+            .map(|p| {
+                (
+                    p.id().clone(),
+                    coord
+                        .get_lifecycle_state(p.id())
+                        .unwrap_or(ProfileLifecycleState::Idle),
+                )
+            })
+            .collect();
+        self.cached_running_ids = self
+            .cached_profiles
+            .iter()
+            .filter(|p| coord.is_profile_running(p.id()))
+            .map(|p| p.id().clone())
+            .collect();
+    }
+
     /// Memperbarui cache daftar monitor yang terdeteksi secara manual atau saat ada perubahan.
     pub fn refresh_monitors(&mut self, cx: &mut Context<Self>) {
-        match self.coordinator.lock().unwrap().available_monitors() {
-            Ok(monitors) => {
-                self.cached_monitors = monitors;
-                self.monitors_error = None;
-            }
-            Err(err) => {
-                let err_msg = err.to_string();
-                self.monitors_error = Some(err_msg.clone());
-                self.status_message = Some(format!("Gagal mendeteksi monitor: {}", err_msg));
-                self.is_error = true;
+        let coordinator_arc = self.coordinator.clone();
+        if let Ok(coord) = coordinator_arc.try_lock() {
+            match coord.available_monitors() {
+                Ok(monitors) => {
+                    self.cached_monitors = monitors;
+                    self.monitors_error = None;
+                }
+                Err(err) => {
+                    let err_msg = err.to_string();
+                    self.monitors_error = Some(err_msg.clone());
+                    self.status_message = Some(format!("Gagal mendeteksi monitor: {}", err_msg));
+                    self.is_error = true;
+                }
             }
         }
         cx.notify();
@@ -99,14 +152,18 @@ impl WindowHopView {
         self.status_message = None;
         self.is_error = false;
 
-        // Segarkan cache monitor saat memilih profil agar informasi layar selalu mutakhir
-        if let Ok(monitors) = self.coordinator.lock().unwrap().available_monitors() {
-            self.cached_monitors = monitors;
-            self.monitors_error = None;
+        // Segarkan cache monitor dan profil saat memilih profil jika koordinator tidak terkunci
+        let coordinator_arc = self.coordinator.clone();
+        if let Ok(coord) = coordinator_arc.try_lock() {
+            if let Ok(monitors) = coord.available_monitors() {
+                self.cached_monitors = monitors;
+                self.monitors_error = None;
+            }
+            self.sync_cache_from_coordinator(&coord);
         }
 
         if let Some(ref pid) = id {
-            let profile_opt = self.coordinator.lock().unwrap().get_profile(pid).cloned();
+            let profile_opt = self.cached_profiles.iter().find(|p| p.id() == pid).cloned();
             if let Some(profile) = profile_opt {
                 let name = profile.name().to_string();
                 let path = profile.browser_path().to_string_lossy().to_string();
@@ -176,6 +233,10 @@ impl WindowHopView {
     /// Operasi disk dijalankan di background executor, dan state memori hanya dikomit
     /// setelah persistensi berhasil.
     pub fn save_profile(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_busy {
+            return;
+        }
+
         let name = self.name_input.read(cx).value().to_string();
         let path_str = self.path_input.read(cx).value().to_string();
         let params = self.params_input.read(cx).value().to_string();
@@ -201,6 +262,7 @@ impl WindowHopView {
         };
 
         let store = self.coordinator.lock().unwrap().store().clone();
+        self.is_busy = true;
         self.status_message = Some("Menyimpan profil...".to_string());
         self.is_error = false;
         cx.notify();
@@ -218,12 +280,13 @@ impl WindowHopView {
 
                 cx.update(|cx| {
                     let _ = this.update(cx, |view, cx| {
+                        view.is_busy = false;
                         match save_result {
                             Ok(()) => {
-                                coordinator
-                                    .lock()
-                                    .unwrap()
-                                    .commit_saved_config(candidate_config);
+                                let mut coord = coordinator.lock().unwrap();
+                                coord.commit_saved_config(candidate_config);
+                                view.sync_cache_from_coordinator(&coord);
+                                drop(coord);
                                 view.selected_profile_id = Some(target_id);
                                 view.status_message =
                                     Some("Profil berhasil disimpan secara atomik.".to_string());
@@ -247,10 +310,14 @@ impl WindowHopView {
     /// Operasi penutupan dan peluncuran dijalankan di background executor
     /// agar tidak memblokir event loop GPUI selama deadline 3 detik.
     pub fn activate_selected_profile(&mut self, cx: &mut Context<Self>) {
+        if self.is_busy {
+            return;
+        }
         let Some(ref pid) = self.selected_profile_id else {
             return;
         };
 
+        self.is_busy = true;
         let pid = pid.clone();
         let coordinator = self.coordinator.clone();
         self.status_message = Some("Mengaktifkan profil...".to_string());
@@ -260,13 +327,18 @@ impl WindowHopView {
         cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let cx = cx.clone();
             async move {
+                let coord_for_task = coordinator.clone();
                 let result = cx
                     .background_executor()
-                    .spawn(async move { coordinator.lock().unwrap().activate_profile(&pid) })
+                    .spawn(async move { coord_for_task.lock().unwrap().activate_profile(&pid) })
                     .await;
 
                 cx.update(|cx| {
                     let _ = this.update(cx, |view, cx| {
+                        view.is_busy = false;
+                        if let Ok(coord) = coordinator.try_lock() {
+                            view.sync_cache_from_coordinator(&coord);
+                        }
                         match result {
                             Ok(ActivationResult::Launched { target_monitor, .. }) => {
                                 view.status_message = Some(format!(
@@ -306,10 +378,14 @@ impl WindowHopView {
     /// Menghentikan profil yang sedang dipilih melalui LifecycleCoordinator.
     /// Dijalankan di background executor untuk menjaga kelancaran antarmuka pengguna.
     pub fn stop_selected_profile(&mut self, cx: &mut Context<Self>) {
+        if self.is_busy {
+            return;
+        }
         let Some(ref pid) = self.selected_profile_id else {
             return;
         };
 
+        self.is_busy = true;
         let pid = pid.clone();
         let coordinator = self.coordinator.clone();
         self.status_message = Some("Menghentikan profil...".to_string());
@@ -319,13 +395,18 @@ impl WindowHopView {
         cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let cx = cx.clone();
             async move {
+                let coord_for_task = coordinator.clone();
                 let result = cx
                     .background_executor()
-                    .spawn(async move { coordinator.lock().unwrap().stop_profile(&pid) })
+                    .spawn(async move { coord_for_task.lock().unwrap().stop_profile(&pid) })
                     .await;
 
                 cx.update(|cx| {
                     let _ = this.update(cx, |view, cx| {
+                        view.is_busy = false;
+                        if let Ok(coord) = coordinator.try_lock() {
+                            view.sync_cache_from_coordinator(&coord);
+                        }
                         match result {
                             Ok(StopOutcome::Graceful { .. }) => {
                                 view.status_message =
@@ -362,46 +443,68 @@ impl WindowHopView {
 impl Render for WindowHopView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let coord = self.coordinator.lock().unwrap();
-        let profiles = coord.list_profiles();
+        // Non-blocking try_lock: jangan memblokir render loop GPUI jika koordinator sedang di-lock oleh task background
+        let coordinator_arc = self.coordinator.clone();
+        if let Ok(coord) = coordinator_arc.try_lock() {
+            self.sync_cache_from_coordinator(&coord);
+        }
+        let profiles = self.cached_profiles.clone();
         let selected_id = self.selected_profile_id.clone();
         let available_monitors = &self.cached_monitors;
+        let is_busy = self.is_busy;
 
         v_flex()
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
-            .p_6()
-            .gap_4()
-            // Header
+            .child(
+                TitleBar::new().child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child("Window Hop - Profil Antrian"),
+                        ),
+                ),
+            )
             .child(
                 v_flex()
-                    .gap_1()
+                    .flex_1()
+                    .p_6()
+                    .gap_4()
+                    .overflow_hidden()
+                    // Header
                     .child(
-                        h_flex()
-                            .justify_between()
-                            .items_center()
+                        v_flex()
+                            .gap_1()
                             .child(
-                                div()
-                                    .text_xl()
-                                    .font_weight(FontWeight::BOLD)
-                                    .child("Window Hop - Profil Antrian"),
+                                h_flex()
+                                    .justify_between()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .text_xl()
+                                            .font_weight(FontWeight::BOLD)
+                                            .child("Pengaturan Profil Antrian"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child("Sesi Windows: Tanpa PIN/Akun Tambahan"),
+                                    ),
                             )
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_sm()
                                     .text_color(theme.muted_foreground)
-                                    .child("Sesi Windows: Tanpa PIN/Akun Tambahan"),
+                                    .child("Konfigurasi satu aplikasi browser dan parameter kustom untuk tampilan antrian poliklinik."),
                             ),
                     )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child("Konfigurasi satu aplikasi browser dan parameter kustom untuk tampilan antrian poliklinik."),
-                    ),
-            )
-            // Banner notifikasi / status error
+                    // Banner notifikasi / status error
             .when_some(self.status_message.as_ref(), |this, msg| {
                 let bg_color = if self.is_error {
                     theme.danger.opacity(0.15)
@@ -462,6 +565,7 @@ impl Render for WindowHopView {
                                     .child(
                                         Button::new("btn-new-profile")
                                             .label("+ Profil Baru")
+                                            .disabled(is_busy)
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 this.select_profile(None, window, cx);
                                             })),
@@ -482,8 +586,10 @@ impl Render for WindowHopView {
                                             let is_selected = selected_id.as_ref() == Some(p.id());
                                             let pid = p.id().clone();
                                             let p_status = p.evaluate_status(available_monitors);
-                                            let p_lifecycle = coord
-                                                .get_lifecycle_state(&pid)
+                                            let p_lifecycle = self
+                                                .cached_lifecycle_states
+                                                .get(&pid)
+                                                .cloned()
                                                 .unwrap_or(ProfileLifecycleState::Idle);
 
                                             let bg = if is_selected {
@@ -637,6 +743,7 @@ impl Render for WindowHopView {
                                             .child(
                                                 Button::new("btn-browse-browser")
                                                     .label("Pilih File .exe...")
+                                                    .disabled(is_busy)
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.browse_browser_executable(cx);
                                                     })),
@@ -672,6 +779,7 @@ impl Render for WindowHopView {
                                                     .child(
                                                         Button::new("btn-refresh-monitors")
                                                             .label("Segarkan Monitor")
+                                                            .disabled(is_busy)
                                                             .on_click(cx.listener(|this, _, _, cx| {
                                                                 this.refresh_monitors(cx);
                                                             })),
@@ -848,7 +956,7 @@ impl Render for WindowHopView {
                             })
                             // Keterangan Status Pergantian / Runtime
                             .when_some(self.selected_profile_id.as_ref(), |this, pid| {
-                                let is_active = coord.is_profile_running(pid);
+                                let is_active = self.cached_running_ids.contains(pid);
                                 if is_active {
                                     this.child(
                                         div()
@@ -864,7 +972,11 @@ impl Render for WindowHopView {
                                 } else {
                                     // Periksa apakah ada profil lain yang sedang aktif di monitor tujuan yang sama
                                     let conflicting_profile = if let Some(ref target_id) = self.selected_target_monitor {
-                                        coord.find_conflicting_active_profile(Some(pid), target_id)
+                                        self.cached_profiles.iter().find(|other| {
+                                            other.id() != pid
+                                                && other.target_monitor() == Some(target_id)
+                                                && self.cached_running_ids.contains(other.id())
+                                        })
                                     } else {
                                         None
                                     };
@@ -894,14 +1006,19 @@ impl Render for WindowHopView {
                                 let is_running = self
                                     .selected_profile_id
                                     .as_ref()
-                                    .map(|id| coord.is_profile_running(id))
+                                    .map(|id| self.cached_running_ids.contains(id))
                                     .unwrap_or(false);
 
                                 h_flex()
                                     .gap_3()
                                     .child(
                                         Button::new("btn-save-profile")
-                                            .label("Simpan Profil")
+                                            .label(if is_busy {
+                                                "Menyimpan..."
+                                            } else {
+                                                "Simpan Profil"
+                                            })
+                                            .disabled(is_busy)
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 this.save_profile(window, cx);
                                             })),
@@ -910,7 +1027,12 @@ impl Render for WindowHopView {
                                         this.child(
                                             Button::new("btn-activate-profile")
                                                 .primary()
-                                                .label("Aktifkan Profil")
+                                                .label(if is_busy {
+                                                    "Memproses..."
+                                                } else {
+                                                    "Aktifkan Profil"
+                                                })
+                                                .disabled(is_busy)
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.activate_selected_profile(cx);
                                                 })),
@@ -920,7 +1042,12 @@ impl Render for WindowHopView {
                                         this.child(
                                             Button::new("btn-stop-profile")
                                                 .danger()
-                                                .label("Hentikan Profil")
+                                                .label(if is_busy {
+                                                    "Menghentikan..."
+                                                } else {
+                                                    "Hentikan Profil"
+                                                })
+                                                .disabled(is_busy)
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.stop_selected_profile(cx);
                                                 })),
@@ -929,6 +1056,7 @@ impl Render for WindowHopView {
                                     .child(
                                         Button::new("btn-reset-form")
                                             .label("Reset")
+                                            .disabled(is_busy)
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 let id = this.selected_profile_id.clone();
                                                 this.select_profile(id, window, cx);
@@ -936,6 +1064,7 @@ impl Render for WindowHopView {
                                     )
                             }),
                     ),
-            )
+            ),
+        )
     }
 }
