@@ -1,7 +1,10 @@
 //! Platform abstraction boundaries for OS display, process lifecycle, and integration.
 
 use crate::browsers::LaunchPlan;
-use crate::domain::{MonitorDescriptor, ProcessId};
+use crate::domain::{MonitorDescriptor, ProcessId, ProfileId};
+use std::io::{BufRead, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -344,11 +347,336 @@ impl ProcessLauncher for MockProcessLauncher {
     }
 }
 
+/// Flag argumen baris perintah untuk aktivasi profil langsung lewat shortcut.
+pub const ACTIVATE_PROFILE_FLAG: &str = "--activate-profile";
+
+/// Membaca flag `--activate-profile <PROFILE_ID>` dari argumen baris perintah jika ada.
+pub fn parse_activation_flag<I>(args: I) -> Option<ProfileId>
+where
+    I: IntoIterator<Item = String>,
+{
+    let args: Vec<String> = args.into_iter().collect();
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == ACTIVATE_PROFILE_FLAG && i + 1 < args.len() {
+            return Some(ProfileId::new(&args[i + 1]));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Spesifikasi pembuatan shortcut profil Window Hop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShortcutSpec {
+    pub profile_id: ProfileId,
+    pub profile_name: String,
+    pub target_dir: PathBuf,
+    pub app_executable: PathBuf,
+    pub arguments: Vec<String>,
+}
+
+impl ShortcutSpec {
+    /// Menghapus atau mengganti karakter ilegal pada nama file shortcut untuk platform Windows.
+    pub fn sanitize_name(name: &str) -> String {
+        let sanitized: String = name
+            .chars()
+            .map(|c| match c {
+                '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+                other => other,
+            })
+            .collect();
+        let trimmed = sanitized.trim();
+        if trimmed.is_empty() {
+            "Profil Window Hop".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    /// Menghasilkan nama file shortcut berekstensi .lnk yang aman dari karakter ilegal.
+    pub fn shortcut_filename(&self) -> String {
+        format!("{}.lnk", Self::sanitize_name(&self.profile_name))
+    }
+
+    /// Menghasilkan path lengkap file shortcut pada target_dir.
+    pub fn shortcut_path(&self) -> PathBuf {
+        self.target_dir.join(self.shortcut_filename())
+    }
+}
+
+/// Menghapus atau mengganti karakter ilegal pada nama file shortcut untuk platform Windows.
+pub fn sanitize_shortcut_filename(name: &str) -> String {
+    ShortcutSpec::sanitize_name(name)
+}
+
+/// Seam antarmuka pembuatan shortcut pada platform OS.
+pub trait ShortcutCreator: Send + Sync {
+    /// Mengambil path folder Desktop default pengguna.
+    fn default_desktop_dir(&self) -> Result<PathBuf, PlatformError>;
+
+    /// Membuat file shortcut berdasarkan spesifikasi yang diberikan.
+    /// Mengembalikan path file shortcut yang berhasil dibuat.
+    fn create_shortcut(&self, spec: &ShortcutSpec) -> Result<PathBuf, PlatformError>;
+}
+
+/// Implementasi tiruan (mock) dari ShortcutCreator untuk pengujian unit deterministik.
+pub struct MockShortcutCreator {
+    default_desktop: PathBuf,
+    created_shortcuts: Mutex<Vec<ShortcutSpec>>,
+    error: Mutex<Option<String>>,
+}
+
+impl MockShortcutCreator {
+    pub fn new(default_desktop: PathBuf) -> Self {
+        Self {
+            default_desktop,
+            created_shortcuts: Mutex::new(Vec::new()),
+            error: Mutex::new(None),
+        }
+    }
+
+    pub fn set_error(&self, error: Option<String>) {
+        *self.error.lock().unwrap() = error;
+    }
+
+    pub fn created_shortcuts(&self) -> Vec<ShortcutSpec> {
+        self.created_shortcuts.lock().unwrap().clone()
+    }
+}
+
+impl ShortcutCreator for MockShortcutCreator {
+    fn default_desktop_dir(&self) -> Result<PathBuf, PlatformError> {
+        if let Some(ref err) = *self.error.lock().unwrap() {
+            return Err(PlatformError::Os(err.clone()));
+        }
+        Ok(self.default_desktop.clone())
+    }
+
+    fn create_shortcut(&self, spec: &ShortcutSpec) -> Result<PathBuf, PlatformError> {
+        if let Some(ref err) = *self.error.lock().unwrap() {
+            return Err(PlatformError::Os(err.clone()));
+        }
+        self.created_shortcuts.lock().unwrap().push(spec.clone());
+        Ok(spec.shortcut_path())
+    }
+}
+
+/// Perintah aktivasi antar-proses (IPC) Window Hop.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ActivationCommand {
+    ActivateProfile(ProfileId),
+}
+
+/// Seam antarmuka koordinasi single-instance dan transmisi aktivasi antar-proses.
+/// Handler fungsi penerima perintah aktivasi IPC.
+pub type ActivationCommandHandler = Arc<dyn Fn(ActivationCommand) + Send + Sync>;
+
+pub trait SingleInstanceCoordinator: Send + Sync {
+    /// Mencoba mengirim perintah aktivasi ke primary instance yang sedang berjalan.
+    /// Mengembalikan Ok(true) jika berhasil terkirim dan direspons.
+    /// Mengembalikan Ok(false) jika belum ada instance yang berjalan.
+    fn send_activation(&self, command: &ActivationCommand) -> Result<bool, PlatformError>;
+
+    /// Memulai listener di background untuk menerima pesan aktivasi dari instance lain.
+    fn start_listener(
+        &self,
+        on_command: Box<dyn Fn(ActivationCommand) + Send + Sync>,
+    ) -> Result<(), PlatformError>;
+}
+
+/// Implementasi tiruan (mock) dari SingleInstanceCoordinator untuk pengujian deterministik.
+pub struct MockSingleInstanceCoordinator {
+    listener: Mutex<Option<ActivationCommandHandler>>,
+}
+
+impl MockSingleInstanceCoordinator {
+    pub fn new() -> Self {
+        Self {
+            listener: Mutex::new(None),
+        }
+    }
+}
+
+impl Default for MockSingleInstanceCoordinator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SingleInstanceCoordinator for MockSingleInstanceCoordinator {
+    fn send_activation(&self, command: &ActivationCommand) -> Result<bool, PlatformError> {
+        let guard = self.listener.lock().unwrap();
+        if let Some(ref callback) = *guard {
+            callback(command.clone());
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn start_listener(
+        &self,
+        on_command: Box<dyn Fn(ActivationCommand) + Send + Sync>,
+    ) -> Result<(), PlatformError> {
+        let mut guard = self.listener.lock().unwrap();
+        *guard = Some(Arc::from(on_command));
+        Ok(())
+    }
+}
+
+/// Implementasi SingleInstanceCoordinator menggunakan loopback socket TCP lokal dan file port.
+/// Bekerja secara portabel di Windows 10/11 maupun Linux tanpa memerlukan library eksternal.
+pub struct LocalSingleInstanceCoordinator {
+    base_data_dir: PathBuf,
+}
+
+impl LocalSingleInstanceCoordinator {
+    pub fn new(base_data_dir: PathBuf) -> Self {
+        Self { base_data_dir }
+    }
+
+    fn port_file_path(&self) -> PathBuf {
+        self.base_data_dir.join("window_hop_ipc.port")
+    }
+
+    fn lock_file_path(&self) -> PathBuf {
+        self.base_data_dir.join("window_hop_ipc.lock")
+    }
+}
+
+impl SingleInstanceCoordinator for LocalSingleInstanceCoordinator {
+    fn send_activation(&self, command: &ActivationCommand) -> Result<bool, PlatformError> {
+        let port_file = self.port_file_path();
+        let lock_file = self.lock_file_path();
+
+        // Jika file port belum ada namun file lock ada (primary sedang dalam proses inisialisasi / startup race),
+        // tunggu beberapa saat agar listener primary selesai melakukan bind dan menulis port.
+        let start_wait = Instant::now();
+        while !port_file.exists()
+            && lock_file.exists()
+            && start_wait.elapsed() < Duration::from_millis(1500)
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        if !port_file.exists() {
+            return Ok(false);
+        }
+
+        let port_str = match std::fs::read_to_string(&port_file) {
+            Ok(s) => s,
+            Err(_) => return Ok(false),
+        };
+
+        let port: u16 = match port_str.trim().parse() {
+            Ok(p) => p,
+            Err(_) => return Ok(false),
+        };
+
+        let addr = format!("127.0.0.1:{}", port);
+        let socket_addr = match addr.parse() {
+            Ok(sa) => sa,
+            Err(e) => return Err(PlatformError::Os(format!("Alamat IP tidak valid: {}", e))),
+        };
+
+        let stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_millis(500)) {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = std::fs::remove_file(&port_file);
+                let _ = std::fs::remove_file(&lock_file);
+                return Ok(false);
+            }
+        };
+
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(1000)));
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(1000)));
+
+        let mut writer = match stream.try_clone() {
+            Ok(w) => w,
+            Err(e) => return Err(PlatformError::Os(e.to_string())),
+        };
+
+        let json_data = serde_json::to_string(command)
+            .map_err(|e| PlatformError::Os(format!("Gagal serialisasi perintah IPC: {}", e)))?;
+
+        writer
+            .write_all(format!("{}\n", json_data).as_bytes())
+            .map_err(|e| PlatformError::Os(format!("Gagal mengirim pesan IPC: {}", e)))?;
+        writer
+            .flush()
+            .map_err(|e| PlatformError::Os(e.to_string()))?;
+
+        let mut reader = BufReader::new(stream);
+        let mut response = String::new();
+        match reader.read_line(&mut response) {
+            Ok(_) if response.trim() == "OK" => Ok(true),
+            _ => Ok(false),
+        }
+    }
+
+    fn start_listener(
+        &self,
+        on_command: Box<dyn Fn(ActivationCommand) + Send + Sync>,
+    ) -> Result<(), PlatformError> {
+        let _ = std::fs::create_dir_all(&self.base_data_dir);
+        let lock_file = self.lock_file_path();
+        let _ = std::fs::write(&lock_file, std::process::id().to_string());
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|e| PlatformError::Os(format!("Gagal bind IPC listener: {}", e)))?;
+
+        let port = listener
+            .local_addr()
+            .map_err(|e| PlatformError::Os(e.to_string()))?
+            .port();
+
+        let port_file = self.port_file_path();
+        std::fs::write(&port_file, port.to_string())
+            .map_err(|e| PlatformError::Os(format!("Gagal menulis file port IPC: {}", e)))?;
+
+        let port_file_cleanup = port_file.clone();
+        let lock_file_cleanup = lock_file.clone();
+        let on_command: Arc<dyn Fn(ActivationCommand) + Send + Sync> = Arc::from(on_command);
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(mut stream) => {
+                        let on_command_clone = on_command.clone();
+                        std::thread::spawn(move || {
+                            let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
+                            if let Ok(stream_clone) = stream.try_clone() {
+                                let mut reader = BufReader::new(stream_clone);
+                                let mut line = String::new();
+                                if reader.read_line(&mut line).is_ok() {
+                                    if let Ok(cmd) =
+                                        serde_json::from_str::<ActivationCommand>(line.trim())
+                                    {
+                                        on_command_clone(cmd);
+                                        let _ = stream.write_all(b"OK\n");
+                                        let _ = stream.flush();
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = std::fs::remove_file(&port_file_cleanup);
+            let _ = std::fs::remove_file(&lock_file_cleanup);
+        });
+
+        Ok(())
+    }
+}
+
 #[cfg(windows)]
 pub mod windows;
 
 #[cfg(windows)]
-pub use windows::{WindowsMonitorProvider, WindowsProcessLauncher};
+pub use windows::{WindowsMonitorProvider, WindowsProcessLauncher, WindowsShortcutCreator};
 
 #[cfg(not(windows))]
 /// Substitut monitor provider untuk lingkungan non-Windows yang melaporkan kapabilitas tidak tersedia.
@@ -381,6 +709,25 @@ impl ProcessLauncher for NonWindowsProcessLauncher {
     }
 }
 
+#[cfg(not(windows))]
+/// Substitut pembuat shortcut untuk lingkungan non-Windows yang melaporkan kapabilitas tidak tersedia.
+pub struct NonWindowsShortcutCreator;
+
+#[cfg(not(windows))]
+impl ShortcutCreator for NonWindowsShortcutCreator {
+    fn default_desktop_dir(&self) -> Result<PathBuf, PlatformError> {
+        Err(PlatformError::Unsupported(
+            "Deteksi direktori Desktop native hanya tersedia pada platform Windows.".to_string(),
+        ))
+    }
+
+    fn create_shortcut(&self, _spec: &ShortcutSpec) -> Result<PathBuf, PlatformError> {
+        Err(PlatformError::Unsupported(
+            "Pembuatan shortcut desktop native hanya tersedia pada platform Windows.".to_string(),
+        ))
+    }
+}
+
 /// Mengembalikan penyedia monitor default untuk platform saat ini.
 pub fn default_monitor_provider() -> Arc<dyn MonitorProvider> {
     #[cfg(windows)]
@@ -391,6 +738,19 @@ pub fn default_monitor_provider() -> Arc<dyn MonitorProvider> {
     #[cfg(not(windows))]
     {
         Arc::new(NonWindowsMonitorProvider)
+    }
+}
+
+/// Mengembalikan pembuat shortcut default untuk platform saat ini.
+pub fn default_shortcut_creator() -> Arc<dyn ShortcutCreator> {
+    #[cfg(windows)]
+    {
+        Arc::new(WindowsShortcutCreator::new())
+    }
+
+    #[cfg(not(windows))]
+    {
+        Arc::new(NonWindowsShortcutCreator)
     }
 }
 

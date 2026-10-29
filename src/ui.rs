@@ -32,15 +32,25 @@ pub struct WindowHopView {
     name_input: Entity<InputState>,
     path_input: Entity<InputState>,
     params_input: Entity<InputState>,
+    shortcut_folder_input: Entity<InputState>,
     status_message: Option<String>,
     is_error: bool,
     confirming_delete_profile: Option<ProfileId>,
 }
 
 impl WindowHopView {
-    /// Membuat instance baru WindowHopView.
+    /// Membuat instance baru WindowHopView dari koordinator yang dimiliki.
     pub fn new(
         coordinator: LifecycleCoordinator,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_shared_coordinator(Arc::new(Mutex::new(coordinator)), window, cx)
+    }
+
+    /// Membuat instance baru WindowHopView dengan koordinator yang dibagikan (shared Arc<Mutex>).
+    pub fn with_shared_coordinator(
+        coordinator: Arc<Mutex<LifecycleCoordinator>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -53,41 +63,52 @@ impl WindowHopView {
         let params_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("--app=https://antrian.local --kiosk")
         });
+        let shortcut_folder_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Default: Desktop (atau masukkan jalur folder alternatif)")
+        });
 
-        // Tampilkan pesan error startup langsung jika pembacaan file konfigurasi awal gagal
-        let initial_error = coordinator.last_error().map(|s| s.to_string());
-        let is_error = initial_error.is_some();
-
-        let (cached_monitors, monitors_error) = match coordinator.available_monitors() {
-            Ok(m) => (m, None),
-            Err(e) => (Vec::new(), Some(e.to_string())),
+        let (initial_error, cached_monitors, monitors_error, cached_profiles) = {
+            let coord = coordinator.lock().unwrap();
+            let initial_error = coord.last_error().map(|s| s.to_string());
+            let (monitors, m_err) = match coord.available_monitors() {
+                Ok(m) => (m, None),
+                Err(e) => (Vec::new(), Some(e.to_string())),
+            };
+            let profiles = coord.list_profiles();
+            (initial_error, monitors, m_err, profiles)
         };
 
-        let cached_profiles = coordinator.list_profiles();
-        let cached_lifecycle_states = cached_profiles
-            .iter()
-            .map(|p| {
-                (
-                    p.id().clone(),
-                    coordinator
-                        .get_lifecycle_state(p.id())
-                        .unwrap_or(ProfileLifecycleState::Idle),
-                )
-            })
-            .collect();
-        let cached_running_ids = cached_profiles
-            .iter()
-            .filter(|p| coordinator.is_profile_running(p.id()))
-            .map(|p| p.id().clone())
-            .collect();
-        let cached_has_running_changes = cached_profiles
-            .iter()
-            .filter(|p| coordinator.has_running_config_changes(p.id()))
-            .map(|p| p.id().clone())
-            .collect();
+        let is_error = initial_error.is_some();
+
+        let (cached_lifecycle_states, cached_running_ids, cached_has_running_changes) = {
+            let coord = coordinator.lock().unwrap();
+            let states = cached_profiles
+                .iter()
+                .map(|p| {
+                    (
+                        p.id().clone(),
+                        coord
+                            .get_lifecycle_state(p.id())
+                            .unwrap_or(ProfileLifecycleState::Idle),
+                    )
+                })
+                .collect();
+            let running = cached_profiles
+                .iter()
+                .filter(|p| coord.is_profile_running(p.id()))
+                .map(|p| p.id().clone())
+                .collect();
+            let changes = cached_profiles
+                .iter()
+                .filter(|p| coord.has_running_config_changes(p.id()))
+                .map(|p| p.id().clone())
+                .collect();
+            (states, running, changes)
+        };
 
         Self {
-            coordinator: Arc::new(Mutex::new(coordinator)),
+            coordinator,
             cached_profiles,
             cached_lifecycle_states,
             cached_running_ids,
@@ -101,6 +122,7 @@ impl WindowHopView {
             name_input,
             path_input,
             params_input,
+            shortcut_folder_input,
             status_message: initial_error,
             is_error,
             confirming_delete_profile: None,
@@ -195,6 +217,9 @@ impl WindowHopView {
                 self.params_input.update(cx, |input, cx| {
                     input.set_value(params, window, cx);
                 });
+                self.shortcut_folder_input.update(cx, |input, cx| {
+                    input.set_value("", window, cx);
+                });
             }
         } else {
             // Reset input form untuk profil baru
@@ -206,6 +231,9 @@ impl WindowHopView {
                 input.set_value("", window, cx);
             });
             self.params_input.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+            });
+            self.shortcut_folder_input.update(cx, |input, cx| {
                 input.set_value("", window, cx);
             });
         }
@@ -240,6 +268,104 @@ impl WindowHopView {
                         });
                     }
                 }
+            }
+        })
+        .detach();
+    }
+
+    /// Membuka dialog pemilih folder alternatif untuk penempatan shortcut.
+    pub fn browse_shortcut_folder(&mut self, cx: &mut Context<Self>) {
+        let window_handle = self.window_handle;
+        let shortcut_folder_input = self.shortcut_folder_input.clone();
+
+        let prompt_task = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Pilih Folder Alternatif Shortcut".into()),
+        });
+
+        cx.spawn(move |_this, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                if let Ok(Ok(Some(paths))) = prompt_task.await {
+                    if let Some(path) = paths.into_iter().next() {
+                        let path_str = path.to_string_lossy().to_string();
+                        cx.update(|cx| {
+                            let _ = window_handle.update(cx, |_view, window, cx| {
+                                shortcut_folder_input.update(cx, |input, cx| {
+                                    input.set_value(path_str, window, cx);
+                                });
+                            });
+                        });
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Membuat shortcut untuk profil yang dipilih (default Desktop atau folder alternatif).
+    pub fn create_shortcut_for_selected_profile(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_busy {
+            return;
+        }
+        let Some(ref pid) = self.selected_profile_id else {
+            return;
+        };
+
+        let raw_dir = self.shortcut_folder_input.read(cx).value().to_string();
+        let custom_dir = if raw_dir.trim().is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(raw_dir.trim()))
+        };
+
+        self.is_busy = true;
+        let pid = pid.clone();
+        let coordinator = self.coordinator.clone();
+        self.status_message = Some("Membuat shortcut...".to_string());
+        self.is_error = false;
+        cx.notify();
+
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                let coord_for_task = coordinator.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        coord_for_task
+                            .lock()
+                            .unwrap()
+                            .create_profile_shortcut(&pid, custom_dir)
+                    })
+                    .await;
+
+                cx.update(|cx| {
+                    let _ = this.update(cx, |view, cx| {
+                        view.is_busy = false;
+                        match result {
+                            Ok(shortcut_path) => {
+                                view.status_message = Some(format!(
+                                    "Shortcut berhasil dibuat di: {}",
+                                    shortcut_path.display()
+                                ));
+                                view.is_error = false;
+                            }
+                            Err(err) => {
+                                view.status_message =
+                                    Some(format!("Gagal membuat shortcut: {}", err));
+                                view.is_error = true;
+                            }
+                        }
+                        cx.notify();
+                    });
+                });
             }
         })
         .detach();
@@ -1240,6 +1366,36 @@ impl Render for WindowHopView {
                                     }
                                 }
                             })
+                            // Field Folder Shortcut (Pilihan Folder Alternatif)
+                            .when(self.selected_profile_id.is_some(), |this| {
+                                this.child(
+                                    v_flex()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .child("Folder Shortcut (Default: Desktop):"),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .child(Input::new(&self.shortcut_folder_input)),
+                                                )
+                                                .child(
+                                                    Button::new("btn-browse-shortcut-folder")
+                                                        .label("Pilih Folder...")
+                                                        .disabled(is_busy)
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.browse_shortcut_folder(cx);
+                                                        })),
+                                                ),
+                                        ),
+                                )
+                            })
                             // Dialog Konfirmasi Penghapusan Profil Aktif
                             .when_some(self.confirming_delete_profile.clone(), |this, confirm_pid| {
                                 let p_name = self
@@ -1394,6 +1550,18 @@ impl Render for WindowHopView {
                                     })
                                     .when(self.selected_profile_id.is_some(), |this| {
                                         this.child(
+                                            Button::new("btn-create-shortcut")
+                                                .label(if is_busy {
+                                                    "Membuat Shortcut..."
+                                                } else {
+                                                    "Buat Shortcut"
+                                                })
+                                                .disabled(is_busy || is_confirming_delete)
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.create_shortcut_for_selected_profile(window, cx);
+                                                })),
+                                        )
+                                        .child(
                                             Button::new("btn-delete-profile")
                                                 .danger()
                                                 .label("Hapus Profil")
