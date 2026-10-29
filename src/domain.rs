@@ -32,6 +32,29 @@ impl fmt::Display for ProfileId {
     }
 }
 
+/// Identitas proses sistem operasi yang dikelola.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProcessId(u32);
+
+impl ProcessId {
+    /// Membuat ProcessId dari nilai numerik PID.
+    pub fn new(pid: u32) -> Self {
+        Self(pid)
+    }
+
+    /// Mengambil representasi integer u32 dari PID.
+    pub fn as_u32(&self) -> u32 {
+        self.0
+    }
+}
+
+impl fmt::Display for ProcessId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PID:{}", self.0)
+    }
+}
+
 /// Identitas konsisten untuk monitor tujuan.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]

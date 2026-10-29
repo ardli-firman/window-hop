@@ -1,12 +1,56 @@
 //! Application coordination, lifecycle management, and profile operations.
 
+use crate::browsers::{BrowserError, LoginRetentionNote};
 use crate::domain::{
-    AppConfig, DraftProfileInput, MonitorDescriptor, MonitorIdentity, Profile, ProfileId,
-    ProfileStatus, TargetMonitorStatus,
+    AppConfig, DraftProfileInput, MonitorDescriptor, MonitorIdentity, ProcessId, Profile,
+    ProfileId, ProfileStatus, TargetMonitorStatus,
 };
 use crate::persistence::{PersistenceError, ProfileStore};
-use crate::platform::{default_monitor_provider, MonitorProvider, PlatformError};
+use crate::platform::{
+    default_clock, default_monitor_provider, default_process_launcher, Clock, ManagedProcess,
+    MonitorProvider, PlatformError, ProcessLauncher,
+};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Hasil aktivasi profil.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActivationResult {
+    /// Profil baru diluncurkan sebagai instance proses baru.
+    Launched {
+        pid: ProcessId,
+        target_monitor: MonitorDescriptor,
+        login_retention: LoginRetentionNote,
+    },
+    /// Profil yang sudah berjalan digunakan kembali (reuse window) dan penempatannya dipastikan ulang.
+    Reused {
+        pid: ProcessId,
+        target_monitor: MonitorDescriptor,
+        login_retention: LoginRetentionNote,
+    },
+}
+
+/// Informasi instance profil yang sedang aktif.
+#[derive(Clone)]
+struct ActiveProfileInstance {
+    process: Arc<dyn ManagedProcess>,
+    launch_browser_path: PathBuf,
+    launch_parameters: String,
+    target_monitor: MonitorDescriptor,
+    login_retention: LoginRetentionNote,
+}
+
+/// Hasil operasi penghentian profil.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopOutcome {
+    /// Ditutup secara normal (graceful) sebelum batas tenggat 3 detik.
+    Graceful { pid: ProcessId },
+    /// Dihentikan secara paksa (force stop) setelah batas tenggat 3 detik terlampaui.
+    Forced { pid: ProcessId },
+    /// Profil tidak sedang berjalan.
+    NotRunning,
+}
 
 /// Kesalahan pada lapisan koordinasi aplikasi.
 #[derive(Debug, thiserror::Error)]
@@ -14,8 +58,14 @@ pub enum ApplicationError {
     #[error("Kesalahan penyimpanan: {0}")]
     Persistence(#[from] PersistenceError),
 
-    #[error("Kesalahan platform display: {0}")]
+    #[error("Kesalahan platform OS: {0}")]
     Platform(#[from] PlatformError),
+
+    #[error("Kesalahan browser: {0}")]
+    Browser(#[from] BrowserError),
+
+    #[error("Dukungan pemisahan sesi dan kepemilikan instance untuk browser '{0}' belum diverifikasi: {1}")]
+    BrowserNotVerified(String, String),
 
     #[error("Validasi input gagal: {0}")]
     ValidationError(String),
@@ -43,25 +93,61 @@ pub enum ApplicationError {
     BlockedByCorruptState(String),
 }
 
+/// Mengembalikan lokasi direktori dasar data sesi Window Hop.
+fn default_base_data_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(local_app_data).join("WindowHop");
+        }
+    }
+    std::env::temp_dir().join("window_hop")
+}
+
 /// Koordinator siklus hidup dan konfigurasi Window Hop.
 pub struct LifecycleCoordinator {
     store: Arc<dyn ProfileStore>,
     monitor_provider: Arc<dyn MonitorProvider>,
+    process_launcher: Arc<dyn ProcessLauncher>,
+    clock: Arc<dyn Clock>,
+    base_data_dir: PathBuf,
     config: AppConfig,
+    active_instances: HashMap<ProfileId, ActiveProfileInstance>,
     last_error: Option<String>,
     load_failed: bool,
 }
 
 impl LifecycleCoordinator {
-    /// Membuat instance baru LifecycleCoordinator dengan ProfileStore dan MonitorProvider yang ditentukan.
-    pub fn new(store: Arc<dyn ProfileStore>, monitor_provider: Arc<dyn MonitorProvider>) -> Self {
+    /// Membuat instance baru LifecycleCoordinator dengan dependensi layanan yang dapat disubstitusi.
+    pub fn with_services(
+        store: Arc<dyn ProfileStore>,
+        monitor_provider: Arc<dyn MonitorProvider>,
+        process_launcher: Arc<dyn ProcessLauncher>,
+        clock: Arc<dyn Clock>,
+        base_data_dir: PathBuf,
+    ) -> Self {
         Self {
             store,
             monitor_provider,
+            process_launcher,
+            clock,
+            base_data_dir,
             config: AppConfig::default(),
+            active_instances: HashMap::new(),
             last_error: None,
             load_failed: false,
         }
+    }
+
+    /// Membuat instance baru LifecycleCoordinator dengan ProfileStore dan MonitorProvider yang ditentukan.
+    pub fn new(store: Arc<dyn ProfileStore>, monitor_provider: Arc<dyn MonitorProvider>) -> Self {
+        Self::with_services(
+            store,
+            monitor_provider,
+            default_process_launcher(),
+            default_clock(),
+            default_base_data_dir(),
+        )
     }
 
     /// Membuat instance baru LifecycleCoordinator dengan MonitorProvider default sistem.
@@ -319,8 +405,9 @@ impl LifecycleCoordinator {
     }
 
     /// Memeriksa apakah suatu profil dapat diaktifkan.
-    /// Profil belum dapat diaktifkan jika monitor tujuan belum dipilih, tidak tersedia,
-    /// atau ambigu. Tidak ada fallback otomatis ke primary atau monitor lain.
+    /// Profil hanya diizinkan untuk diaktifkan jika monitor tujuan cocok dan tersedia (tanpa fallback),
+    /// adapter browser memiliki bukti pemisahan sesi dan penanganan kepemilikan,
+    /// serta parameter peluncuran kustom tidak berbenturan dengan isolasi sesi profil.
     pub fn can_activate(&self, id: &ProfileId) -> Result<bool, ApplicationError> {
         let profile = self
             .get_profile(id)
@@ -332,22 +419,206 @@ impl LifecycleCoordinator {
 
         let monitors = self.available_monitors()?;
         match profile.evaluate_target_monitor(&monitors) {
-            TargetMonitorStatus::Unset => Err(ApplicationError::DraftNotReady { id: id.clone() }),
+            TargetMonitorStatus::Unset => {
+                return Err(ApplicationError::DraftNotReady { id: id.clone() })
+            }
             TargetMonitorStatus::Unavailable { recorded_identity } => {
-                Err(ApplicationError::TargetMonitorUnavailable {
+                return Err(ApplicationError::TargetMonitorUnavailable {
                     id: id.clone(),
                     recorded_identity,
-                })
+                });
             }
             TargetMonitorStatus::Ambiguous {
                 recorded_identity,
                 match_count,
-            } => Err(ApplicationError::TargetMonitorAmbiguous {
-                id: id.clone(),
-                recorded_identity,
-                match_count,
-            }),
-            TargetMonitorStatus::Available(_) => Ok(true),
+            } => {
+                return Err(ApplicationError::TargetMonitorAmbiguous {
+                    id: id.clone(),
+                    recorded_identity,
+                    match_count,
+                });
+            }
+            TargetMonitorStatus::Available(_) => {}
+        }
+
+        // Verifikasi kapabilitas browser
+        let adapter = match crate::browsers::detect_browser_support(profile.browser_path()) {
+            crate::browsers::BrowserSupportStatus::Verified(adapter) => adapter,
+            crate::browsers::BrowserSupportStatus::Unverified => {
+                return Err(ApplicationError::BrowserNotVerified(
+                    profile.browser_path().display().to_string(),
+                    format!(
+                        "Dukungan pemisahan sesi dan kepemilikan instance untuk browser '{}' belum diverifikasi.",
+                        profile.browser_path().display()
+                    ),
+                ));
+            }
+        };
+
+        // Verifikasi parameter kustom: tolak argumen yang berbenturan sebelum aktivasi
+        adapter.validate_custom_parameters(profile.custom_parameters())?;
+
+        Ok(true)
+    }
+
+    /// Mengaktifkan profil Window Hop pada monitor tujuannya dengan pemisahan sesi browser.
+    ///
+    /// Aturan:
+    /// - Hanya diizinkan jika monitor tujuan cocok dan browser terverifikasi.
+    /// - Memeriksa argumen kustom; menolak argumen yang berbenturan dengan isolasi sesi.
+    /// - Jika profil sudah memiliki window/instance yang berjalan dengan konfigurasi yang sama,
+    ///   window tersebut digunakan kembali (reuse window) dan penempatannya dipastikan ulang ke
+    ///   monitor tujuan tanpa meluncurkan proses baru.
+    /// - Jika konfigurasi telah diubah dan disimpan, aktivasi menerapkan konfigurasi terbaru
+    ///   dengan menghentikan browser lama sebelum menjalankan yang baru.
+    /// - Jika belum berjalan, meluncurkan browser terisolasi dengan direktori data sesi khusus profil.
+    pub fn activate_profile(
+        &mut self,
+        id: &ProfileId,
+    ) -> Result<ActivationResult, ApplicationError> {
+        self.can_activate(id)?;
+
+        let profile = self
+            .get_profile(id)
+            .ok_or_else(|| ApplicationError::ProfileNotFound { id: id.clone() })?
+            .clone();
+
+        let monitors = self.available_monitors()?;
+        let target_desc = match profile.evaluate_target_monitor(&monitors) {
+            TargetMonitorStatus::Available(desc) => desc,
+            _ => unreachable!("can_activate already confirmed target monitor availability"),
+        };
+
+        let adapter = match crate::browsers::detect_browser_support(profile.browser_path()) {
+            crate::browsers::BrowserSupportStatus::Verified(adapter) => adapter,
+            crate::browsers::BrowserSupportStatus::Unverified => {
+                unreachable!("can_activate already confirmed browser verification")
+            }
+        };
+
+        // Periksa apakah instance profil sudah berjalan (reuse window)
+        if let Some(existing) = self.active_instances.get(id) {
+            if existing.process.is_alive() {
+                let is_same_config = existing.launch_browser_path == *profile.browser_path()
+                    && existing.launch_parameters == profile.custom_parameters()
+                    && existing.target_monitor == target_desc;
+
+                if is_same_config {
+                    existing
+                        .process
+                        .reposition(&target_desc)
+                        .map_err(ApplicationError::Platform)?;
+                    return Ok(ActivationResult::Reused {
+                        pid: existing.process.pid(),
+                        target_monitor: target_desc,
+                        login_retention: existing.login_retention.clone(),
+                    });
+                } else {
+                    // Konfigurasi profil telah berubah: hentikan instance lama terlebih dahulu
+                    self.stop_profile(id)?;
+                }
+            } else {
+                self.active_instances.remove(id);
+            }
+        }
+
+        let profile_data_dir = self
+            .base_data_dir
+            .join("profiles")
+            .join(id.as_str())
+            .join("browser_session");
+
+        let launch_plan = adapter.build_launch_plan(
+            profile.browser_path(),
+            &profile_data_dir,
+            profile.custom_parameters(),
+        )?;
+
+        let managed_proc = self
+            .process_launcher
+            .launch(&launch_plan, &target_desc)
+            .map_err(ApplicationError::Platform)?;
+
+        let pid = managed_proc.pid();
+        let login_retention = launch_plan.login_retention.clone();
+
+        self.active_instances.insert(
+            id.clone(),
+            ActiveProfileInstance {
+                process: managed_proc,
+                launch_browser_path: profile.browser_path().to_path_buf(),
+                launch_parameters: profile.custom_parameters().to_string(),
+                target_monitor: target_desc.clone(),
+                login_retention: login_retention.clone(),
+            },
+        );
+
+        Ok(ActivationResult::Launched {
+            pid,
+            target_monitor: target_desc,
+            login_retention,
+        })
+    }
+
+    /// Memeriksa apakah profil sedang berjalan aktif dengan instance proses yang masih hidup.
+    pub fn is_profile_running(&self, id: &ProfileId) -> bool {
+        self.active_instances
+            .get(id)
+            .map(|inst| inst.process.is_alive())
+            .unwrap_or(false)
+    }
+
+    /// Mengambil referensi ke instance proses yang sedang aktif untuk profil tertentu (jika ada).
+    pub fn active_instance(&self, id: &ProfileId) -> Option<Arc<dyn ManagedProcess>> {
+        self.active_instances
+            .get(id)
+            .map(|inst| inst.process.clone())
+    }
+
+    /// Menghentikan profil yang sedang berjalan.
+    ///
+    /// Aturan:
+    /// - Mengirimkan permintaan penutupan normal (graceful close) terlebih dahulu.
+    /// - Menunggu hingga proses berhenti dengan batas tenggat 3 detik.
+    /// - Jika belum berhenti setelah 3 detik, menghentikan paksa (force stop) hanya instance milik profil yang terverifikasi.
+    /// - Proses lain (termasuk browser kerja perawat) tidak disentuh sama sekali.
+    pub fn stop_profile(&mut self, id: &ProfileId) -> Result<StopOutcome, ApplicationError> {
+        let instance = match self.active_instances.get(id) {
+            Some(inst) => {
+                if !inst.process.is_alive() {
+                    self.active_instances.remove(id);
+                    return Ok(StopOutcome::NotRunning);
+                }
+                inst.process.clone()
+            }
+            None => return Ok(StopOutcome::NotRunning),
+        };
+
+        let pid = instance.pid();
+
+        // 1. Minta penutupan anggun (graceful close)
+        instance
+            .request_close()
+            .map_err(ApplicationError::Platform)?;
+
+        // 2. Tunggu hingga proses berhenti atau batas 3 detik terlampaui menggunakan Clock
+        let start_time = self.clock.now();
+        let timeout = std::time::Duration::from_secs(3);
+        let poll_interval = std::time::Duration::from_millis(100);
+
+        while instance.is_alive() && self.clock.now().duration_since(start_time) < timeout {
+            self.clock.sleep(poll_interval);
+        }
+
+        // 3. Evaluasi apakah sudah berhenti atau perlu force stop
+        if !instance.is_alive() {
+            self.active_instances.remove(id);
+            Ok(StopOutcome::Graceful { pid })
+        } else {
+            // Force stop hanya pada instance profil terverifikasi
+            instance.force_stop().map_err(ApplicationError::Platform)?;
+            self.active_instances.remove(id);
+            Ok(StopOutcome::Forced { pid })
         }
     }
 

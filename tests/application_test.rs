@@ -1,12 +1,17 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::tempdir;
-use window_hop::application::{ApplicationError, LifecycleCoordinator};
+use window_hop::application::{
+    ActivationResult, ApplicationError, LifecycleCoordinator, StopOutcome,
+};
 use window_hop::domain::{
-    DraftProfileInput, MonitorDescriptor, MonitorIdentity, ProfileStatus, TargetMonitorStatus,
+    DraftProfileInput, MonitorDescriptor, MonitorIdentity, ProfileId, ProfileStatus,
+    TargetMonitorStatus,
 };
 use window_hop::persistence::{FileProfileStore, MemoryProfileStore};
-use window_hop::platform::MockMonitorProvider;
+use window_hop::platform::{
+    Clock, ManagedProcess, MockClock, MockMonitorProvider, MockProcessLauncher, ProcessLauncher,
+};
 
 #[test]
 fn test_create_multiple_draft_profiles_and_verify_draft_status() {
@@ -249,7 +254,7 @@ fn test_save_profile_with_target_monitor_and_evaluate_ready_status() {
             None,
             DraftProfileInput::new(
                 "Antrian Rawat Jalan",
-                PathBuf::from("chrome.exe"),
+                PathBuf::from("msedge.exe"),
                 "--kiosk",
             )
             .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-ROOM1"))),
@@ -523,7 +528,7 @@ fn test_replaced_monitor_with_different_identity_requires_reselection() {
     let profile_id = coordinator
         .save_draft_profile(
             None,
-            DraftProfileInput::new("Antrian IGD", PathBuf::from("chrome.exe"), "--kiosk")
+            DraftProfileInput::new("Antrian IGD", PathBuf::from("msedge.exe"), "--kiosk")
                 .with_target_monitor(Some(old_id.clone())),
         )
         .expect("save profile");
@@ -551,7 +556,7 @@ fn test_replaced_monitor_with_different_identity_requires_reselection() {
     coordinator
         .save_draft_profile(
             Some(&profile_id),
-            DraftProfileInput::new("Antrian IGD", PathBuf::from("chrome.exe"), "--kiosk")
+            DraftProfileInput::new("Antrian IGD", PathBuf::from("msedge.exe"), "--kiosk")
                 .with_target_monitor(Some(new_id.clone())),
         )
         .expect("reselect target monitor");
@@ -562,4 +567,647 @@ fn test_replaced_monitor_with_different_identity_requires_reselection() {
         ProfileStatus::Ready
     );
     assert!(coordinator.can_activate(&profile_id).unwrap());
+}
+
+#[test]
+fn test_activate_profile_fails_when_browser_unverified() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE"),
+        name: "Queue Display".to_string(),
+        is_primary: false,
+    }]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Gigi Chrome",
+                PathBuf::from(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+                "--kiosk",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
+        )
+        .expect("save profile");
+
+    // Can activate must report browser not verified
+    let can_res = coordinator.can_activate(&profile_id);
+    assert!(can_res.is_err());
+    match can_res.unwrap_err() {
+        ApplicationError::BrowserNotVerified(path, reason) => {
+            assert!(path.contains("chrome.exe"));
+            assert!(reason.contains("belum diverifikasi"));
+        }
+        err => panic!("expected BrowserNotVerified, got: {:?}", err),
+    }
+
+    // Attempting to activate must fail and launch NO process
+    let act_res = coordinator.activate_profile(&profile_id);
+    assert!(act_res.is_err());
+    assert_eq!(launcher.launched_processes().len(), 0);
+}
+
+#[test]
+fn test_activate_profile_fails_when_custom_parameters_conflict() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE"),
+        name: "Queue Display".to_string(),
+        is_primary: false,
+    }]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Edge Konflik",
+                PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+                "--user-data-dir=C:\\NurseWorkingProfile",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
+        )
+        .expect("save profile");
+
+    // Pre-activation check can_activate must reject conflicting isolation parameter
+    let can_res = coordinator.can_activate(&profile_id);
+    assert!(can_res.is_err());
+    match can_res.unwrap_err() {
+        ApplicationError::Browser(
+            window_hop::browsers::BrowserError::ConflictingIsolationParameter { arg, .. },
+        ) => {
+            assert!(arg.contains("--user-data-dir"));
+        }
+        err => panic!("expected ConflictingIsolationParameter, got: {:?}", err),
+    }
+
+    let act_res = coordinator.activate_profile(&profile_id);
+    assert!(act_res.is_err());
+    match act_res.unwrap_err() {
+        ApplicationError::Browser(
+            window_hop::browsers::BrowserError::ConflictingIsolationParameter { arg, .. },
+        ) => {
+            assert!(arg.contains("--user-data-dir"));
+        }
+        err => panic!("expected ConflictingIsolationParameter, got: {:?}", err),
+    }
+    assert_eq!(launcher.launched_processes().len(), 0);
+}
+
+#[test]
+fn test_activate_profile_launches_isolated_edge_on_target_monitor_preserving_nurse_browser() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let target_mon = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE-ROOM2"),
+        name: "Room 2 Queue Monitor".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![
+        MonitorDescriptor {
+            identity: MonitorIdentity::new("MON-PRIMARY"),
+            name: "Workstation Main Display".to_string(),
+            is_primary: true,
+        },
+        target_mon.clone(),
+    ]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_edge");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir.clone(),
+    );
+
+    // Simulate nurse's already running working Edge instance
+    let nurse_working_browser_plan = window_hop::browsers::LaunchPlan {
+        executable: PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+        arguments: vec!["https://hospital.simrs/nurse-dashboard".to_string()],
+        user_data_dir: PathBuf::from(r"C:\Users\Nurse\AppData\Local\Microsoft\Edge\User Data"),
+        login_retention: window_hop::browsers::LoginRetentionNote::SessionIsolated {
+            explanation: "Nurse default session".to_string(),
+        },
+    };
+    let nurse_process = launcher
+        .launch(
+            &nurse_working_browser_plan,
+            &MonitorDescriptor {
+                identity: MonitorIdentity::new("MON-PRIMARY"),
+                name: "Workstation Main Display".to_string(),
+                is_primary: true,
+            },
+        )
+        .expect("nurse browser running");
+    let nurse_pid = nurse_process.pid();
+
+    // Now save and activate Window Hop queue profile
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Poliklinik Mata",
+                PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+                r#"--kiosk "https://antrian.poli/mata?room=2""#,
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-ROOM2"))),
+        )
+        .expect("save profile");
+
+    assert!(coordinator.can_activate(&profile_id).unwrap());
+
+    let activation_result = coordinator
+        .activate_profile(&profile_id)
+        .expect("activate profile");
+
+    match activation_result {
+        ActivationResult::Launched {
+            pid,
+            target_monitor,
+            login_retention,
+        } => {
+            assert_ne!(
+                pid, nurse_pid,
+                "Queue profile must have its own isolated PID"
+            );
+            assert_eq!(target_monitor, target_mon);
+            match login_retention {
+                window_hop::browsers::LoginRetentionNote::KioskOrInPrivateNoRetention {
+                    explanation,
+                } => {
+                    assert!(explanation.contains("kiosk"));
+                }
+                other => panic!("expected KioskOrInPrivateNoRetention, got: {:?}", other),
+            }
+
+            // Verify queue process launch plan
+            let launched = launcher.launched_processes();
+            assert_eq!(launched.len(), 2, "Nurse process + queue process");
+            let queue_proc = &launched[1];
+            assert_eq!(queue_proc.pid(), pid);
+            assert_eq!(queue_proc.current_monitor(), target_mon);
+
+            let expected_user_data_dir = base_dir
+                .join("profiles")
+                .join(profile_id.as_str())
+                .join("browser_session");
+            assert!(
+                queue_proc
+                    .plan()
+                    .arguments
+                    .iter()
+                    .any(|arg| arg.contains(&expected_user_data_dir.display().to_string())),
+                "Queue profile must use its own isolated user-data-dir"
+            );
+            assert!(queue_proc
+                .plan()
+                .arguments
+                .iter()
+                .any(|arg| arg == "--kiosk"));
+            assert!(queue_proc
+                .plan()
+                .arguments
+                .iter()
+                .any(|arg| arg == "https://antrian.poli/mata?room=2"));
+        }
+        ActivationResult::Reused { .. } => {
+            panic!("first activation should be Launched, not Reused")
+        }
+    }
+
+    // Verify nurse working browser is still alive and was NOT touched or moved!
+    assert!(
+        nurse_process.is_alive(),
+        "Nurse working browser must remain alive"
+    );
+    let nurse_mock = launcher.launched_processes()[0].clone();
+    assert!(
+        !nurse_mock.close_requested(),
+        "Nurse browser must not receive close request"
+    );
+    assert!(
+        !nurse_mock.force_stopped(),
+        "Nurse browser must not be stopped"
+    );
+    assert_eq!(
+        nurse_mock.current_monitor().identity.as_str(),
+        "MON-PRIMARY",
+        "Nurse browser must not be moved"
+    );
+}
+
+#[test]
+fn test_repeated_activation_reuses_running_window_and_restores_placement_without_duplication() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let target_mon = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE"),
+        name: "Queue Display".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![target_mon.clone()]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_reuse");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Gigi",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
+        )
+        .expect("save profile");
+
+    // First activation: launches fresh process
+    let act1 = coordinator
+        .activate_profile(&profile_id)
+        .expect("first activation");
+    let pid1 = match act1 {
+        ActivationResult::Launched {
+            pid,
+            target_monitor,
+            ..
+        } => {
+            assert_eq!(target_monitor, target_mon);
+            pid
+        }
+        ActivationResult::Reused { .. } => panic!("expected Launched on first activation"),
+    };
+
+    assert_eq!(launcher.launched_processes().len(), 1);
+    let proc = launcher.launched_processes()[0].clone();
+    assert_eq!(proc.pid(), pid1);
+    assert_eq!(proc.reposition_count(), 0);
+
+    // Simulate window being moved accidentally by user to another monitor
+    let other_monitor = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-MOVED"),
+        name: "Moved Display".to_string(),
+        is_primary: true,
+    };
+    proc.reposition(&other_monitor).expect("moved");
+    assert_eq!(proc.current_monitor(), other_monitor);
+    assert_eq!(proc.reposition_count(), 1);
+
+    // Second activation (same configuration, repeated shortcut click):
+    // MUST reuse existing window and restore placement to target monitor WITHOUT creating duplicate process!
+    let act2 = coordinator
+        .activate_profile(&profile_id)
+        .expect("second activation");
+    match act2 {
+        ActivationResult::Reused {
+            pid,
+            target_monitor,
+            ..
+        } => {
+            assert_eq!(pid, pid1, "Reused instance must have same PID");
+            assert_eq!(target_monitor, target_mon);
+        }
+        ActivationResult::Launched { .. } => {
+            panic!("expected Reused on repeated activation, not Launched")
+        }
+    }
+
+    // No duplicate process launched!
+    assert_eq!(
+        launcher.launched_processes().len(),
+        1,
+        "Must NOT launch a duplicate process"
+    );
+    // Reposition was called to restore window back to target monitor!
+    assert_eq!(proc.reposition_count(), 2);
+    assert_eq!(
+        proc.current_monitor(),
+        target_mon,
+        "Window must be returned to target monitor"
+    );
+
+    // Now simulate browser exiting / closing
+    proc.simulate_exit();
+    assert!(!coordinator.is_profile_running(&profile_id));
+
+    // Third activation after exit: should launch a new instance
+    let act3 = coordinator
+        .activate_profile(&profile_id)
+        .expect("third activation after exit");
+    match act3 {
+        ActivationResult::Launched {
+            pid,
+            target_monitor,
+            ..
+        } => {
+            assert_ne!(pid, pid1, "New process must have different PID");
+            assert_eq!(target_monitor, target_mon);
+        }
+        ActivationResult::Reused { .. } => {
+            panic!("expected Launched when prior process has exited")
+        }
+    }
+    assert_eq!(
+        launcher.launched_processes().len(),
+        2,
+        "Second process launched after exit"
+    );
+}
+
+#[test]
+fn test_activation_with_changed_configuration_stops_old_instance_and_launches_new_instance() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let mon1 = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE-1"),
+        name: "Queue Display 1".to_string(),
+        is_primary: false,
+    };
+    let mon2 = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE-2"),
+        name: "Queue Display 2".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![mon1.clone(), mon2.clone()]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_config_change");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian IGD",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local/v1",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-1"))),
+        )
+        .expect("save initial profile");
+
+    // Launch with v1 config
+    let act1 = coordinator
+        .activate_profile(&profile_id)
+        .expect("launch v1");
+    let pid1 = match act1 {
+        ActivationResult::Launched { pid, .. } => pid,
+        _ => panic!("expected Launched"),
+    };
+
+    let proc1 = launcher.launched_processes()[0].clone();
+    assert!(proc1.is_alive());
+
+    // Nurse updates profile configuration (new URL / parameters and new target monitor)
+    coordinator
+        .save_draft_profile(
+            Some(&profile_id),
+            DraftProfileInput::new(
+                "Antrian IGD",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local/v2",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-2"))),
+        )
+        .expect("save edited profile");
+
+    // Next activation must apply latest saved configuration:
+    // It must stop old instance and launch new instance!
+    let act2 = coordinator
+        .activate_profile(&profile_id)
+        .expect("launch v2");
+    let pid2 = match act2 {
+        ActivationResult::Launched {
+            pid,
+            target_monitor,
+            ..
+        } => {
+            assert_eq!(target_monitor, mon2);
+            pid
+        }
+        ActivationResult::Reused { .. } => panic!("expected Launched with new config, not Reused"),
+    };
+
+    assert_ne!(pid1, pid2, "New instance must have different PID");
+    assert!(!proc1.is_alive(), "Old instance must have been stopped");
+    assert!(proc1.close_requested());
+    assert_eq!(launcher.launched_processes().len(), 2);
+    let proc2 = launcher.launched_processes()[1].clone();
+    assert_eq!(proc2.pid(), pid2);
+    assert_eq!(proc2.current_monitor(), mon2);
+    assert!(proc2
+        .plan()
+        .arguments
+        .iter()
+        .any(|arg| arg == "https://antrian.local/v2"));
+}
+
+#[test]
+fn test_stop_profile_when_not_running_returns_not_running() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let mut coordinator = LifecycleCoordinator::from_store(store);
+
+    let id = ProfileId::generate();
+    let outcome = coordinator.stop_profile(&id).expect("stop profile");
+    assert_eq!(outcome, StopOutcome::NotRunning);
+}
+
+#[test]
+fn test_stop_profile_cooperative_exits_gracefully_within_deadline() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let target_mon = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE"),
+        name: "Queue Display".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![target_mon.clone()]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_graceful");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock.clone(),
+        base_dir,
+    );
+
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Gigi",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
+        )
+        .expect("save profile");
+
+    let act = coordinator.activate_profile(&profile_id).expect("activate");
+    let pid = match act {
+        ActivationResult::Launched { pid, .. } => pid,
+        _ => panic!("expected Launched"),
+    };
+
+    let proc = launcher.launched_processes()[0].clone();
+    assert!(proc.is_alive());
+
+    // Stop profile (cooperative process simulates exit when requested)
+    let outcome = coordinator.stop_profile(&profile_id).expect("stop profile");
+    assert_eq!(outcome, StopOutcome::Graceful { pid });
+    assert!(proc.close_requested());
+    assert!(
+        !proc.force_stopped(),
+        "Must NOT force stop cooperative process"
+    );
+    assert!(!coordinator.is_profile_running(&profile_id));
+}
+
+#[test]
+fn test_stop_profile_unresponsive_force_stops_after_3_seconds_preserving_nurse_browser() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let target_mon = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE"),
+        name: "Queue Display".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![
+        MonitorDescriptor {
+            identity: MonitorIdentity::new("MON-PRIMARY"),
+            name: "Workstation Main Display".to_string(),
+            is_primary: true,
+        },
+        target_mon.clone(),
+    ]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_forced");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock.clone(),
+        base_dir,
+    );
+
+    // Nurse working browser is running
+    let nurse_plan = window_hop::browsers::LaunchPlan {
+        executable: PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+        arguments: vec!["https://hospital.simrs/nurse-dashboard".to_string()],
+        user_data_dir: PathBuf::from(r"C:\Users\Nurse\AppData\Local\Microsoft\Edge\User Data"),
+        login_retention: window_hop::browsers::LoginRetentionNote::SessionIsolated {
+            explanation: "Nurse default session".to_string(),
+        },
+    };
+    let nurse_process = launcher
+        .launch(
+            &nurse_plan,
+            &MonitorDescriptor {
+                identity: MonitorIdentity::new("MON-PRIMARY"),
+                name: "Workstation Main Display".to_string(),
+                is_primary: true,
+            },
+        )
+        .expect("nurse browser running");
+
+    // Save and activate queue profile
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Gigi Kiosk",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
+        )
+        .expect("save profile");
+
+    let act = coordinator.activate_profile(&profile_id).expect("activate");
+    let queue_pid = match act {
+        ActivationResult::Launched { pid, .. } => pid,
+        _ => panic!("expected Launched"),
+    };
+
+    let queue_proc = launcher.launched_processes()[1].clone();
+    // Simulate unresponsive queue browser (e.g. hung or confirmation dialog blocking exit)
+    queue_proc.set_refuse_graceful(true);
+
+    let t0 = clock.now();
+    let outcome = coordinator.stop_profile(&profile_id).expect("stop profile");
+    let t1 = clock.now();
+
+    // Verification:
+    // 1. Outcome must be Forced after 3 seconds
+    assert_eq!(outcome, StopOutcome::Forced { pid: queue_pid });
+    assert!(
+        t1.duration_since(t0) >= std::time::Duration::from_secs(3),
+        "Must wait for 3-second deadline before force stopping"
+    );
+
+    // 2. Queue process received close request first, then force stop
+    assert!(
+        queue_proc.close_requested(),
+        "Must have requested graceful close first"
+    );
+    assert!(
+        queue_proc.force_stopped(),
+        "Must have force stopped unresponsive process"
+    );
+    assert!(!queue_proc.is_alive());
+    assert!(!coordinator.is_profile_running(&profile_id));
+
+    // 3. Nurse working browser MUST be completely untouched!
+    assert!(
+        nurse_process.is_alive(),
+        "Nurse working browser must remain alive"
+    );
+    let nurse_mock = launcher.launched_processes()[0].clone();
+    assert!(
+        !nurse_mock.close_requested(),
+        "Nurse browser must not receive close request"
+    );
+    assert!(
+        !nurse_mock.force_stopped(),
+        "Nurse browser must not be force stopped"
+    );
 }
