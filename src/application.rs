@@ -1352,6 +1352,7 @@ impl LifecycleCoordinator {
     pub fn shutdown(&mut self) -> Result<Vec<(ProfileId, StopOutcome)>, ApplicationError> {
         let active_keys: Vec<ProfileId> = self.active_instances.keys().cloned().collect();
         let mut outcomes = Vec::new();
+        let mut first_error = None;
 
         for pid in active_keys {
             match self.stop_profile(&pid) {
@@ -1359,9 +1360,9 @@ impl LifecycleCoordinator {
                     outcomes.push((pid, outcome));
                 }
                 Err(err) => {
-                    self.last_error = Some(err.to_string());
-                    let _ = self.update_tray_status();
-                    return Err(err);
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
                 }
             }
         }
@@ -1369,6 +1370,11 @@ impl LifecycleCoordinator {
         self.active_instances.clear();
         let _ = self.update_tray_status();
         let _ = self.tray_provider.remove_tray();
+
+        if let Some(err) = first_error {
+            self.last_error = Some(err.to_string());
+            return Err(err);
+        }
 
         Ok(outcomes)
     }

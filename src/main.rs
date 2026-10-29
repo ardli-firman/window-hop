@@ -65,7 +65,13 @@ fn main() {
             // Berhasil dikirim ke koordinator yang sedang berjalan; keluar segera tanpa membuka pengaturan
             return;
         }
-    } else if !is_silent_or_startup {
+    } else if is_silent_or_startup {
+        // Jika dipanggil silent/startup dan sudah ada instance primer yang berjalan di tray,
+        // kirim Ping untuk memeriksa dan keluar segera agar tidak membuat instance ganda
+        if let Ok(true) = ipc.send_activation(&ActivationCommand::Ping) {
+            return;
+        }
+    } else {
         // Jika dipanggil secara normal tanpa argumen dan sudah ada instance berjalan di tray, minta buka pengaturan
         if let Ok(true) = ipc.send_activation(&ActivationCommand::OpenSettings) {
             return;
@@ -100,6 +106,9 @@ fn main() {
             }
             ActivationCommand::OpenSettings => {
                 let _ = tx_for_ipc.send_blocking(AppEvent::OpenSettings);
+            }
+            ActivationCommand::Ping => {
+                // Instance primer merespons Ping (ACK OK otomatis dikirimkan ke stream IPC)
             }
         }));
 

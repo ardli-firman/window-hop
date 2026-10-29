@@ -482,6 +482,7 @@ impl ShortcutCreator for MockShortcutCreator {
 pub enum ActivationCommand {
     ActivateProfile(ProfileId),
     OpenSettings,
+    Ping,
 }
 
 /// Seam antarmuka koordinasi single-instance dan transmisi aktivasi antar-proses.

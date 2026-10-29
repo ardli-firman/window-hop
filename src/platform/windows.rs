@@ -488,8 +488,7 @@ impl WindowsTrayProvider {
 
         std::thread::spawn(move || {
             // Jalankan loop pesan Win32 pada thread terpisah agar tidak membekukan UI GPUI
-            let hwnd_res = Self::run_tray_message_loop(thread_state);
-            let _ = tx.send(hwnd_res);
+            Self::run_tray_message_loop(thread_state, tx);
         });
 
         let hwnd_raw = match rx.recv_timeout(std::time::Duration::from_secs(3)) {
@@ -504,7 +503,10 @@ impl WindowsTrayProvider {
         }
     }
 
-    fn run_tray_message_loop(shared_state: Arc<TraySharedState>) -> Result<isize, PlatformError> {
+    fn run_tray_message_loop(
+        shared_state: Arc<TraySharedState>,
+        tx: std::sync::mpsc::Sender<Result<isize, PlatformError>>,
+    ) {
         // Daftarkan window class unik untuk hidden window penampung tray icon
         let class_name: Vec<u16> = "WindowHopTrayMessageWindowClass\0".encode_utf16().collect();
 
@@ -539,9 +541,10 @@ impl WindowsTrayProvider {
         };
 
         if hwnd.0.is_null() {
-            return Err(PlatformError::Os(
+            let _ = tx.send(Err(PlatformError::Os(
                 "Gagal membuat window penampung notifikasi system tray".to_string(),
-            ));
+            )));
+            return;
         }
 
         // Daftarkan ikon tray ke Shell Windows
@@ -564,6 +567,8 @@ impl WindowsTrayProvider {
         }
 
         let hwnd_raw_val = hwnd.0 as isize;
+        // Kirimkan HWND ke thread pemanggil segera setelah window dibuat sebelum memasuki blocking message loop
+        let _ = tx.send(Ok(hwnd_raw_val));
 
         // Loop penanganan pesan Win32 standar
         // SAFETY: MSG struct diinisialisasi nol sebelum pemanggilan GetMessageW.
@@ -574,8 +579,6 @@ impl WindowsTrayProvider {
                 DispatchMessageW(&msg);
             }
         }
-
-        Ok(hwnd_raw_val)
     }
 
     fn build_notify_icon_data(hwnd: HWND, tooltip: &str) -> NOTIFYICONDATAW {
@@ -685,6 +688,16 @@ impl WindowsTrayProvider {
                                 None,
                             );
                             DestroyMenu(hmenu);
+                            // Sesuai panduan Microsoft KB135788 untuk TrackPopupMenu notifikasi tray:
+                            // kirimkan WM_NULL agar popup menu menutup otomatis saat pengguna mengklik jendela lain
+                            unsafe {
+                                windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                                    Some(hwnd),
+                                    windows::Win32::UI::WindowsAndMessaging::WM_NULL,
+                                    WPARAM(0),
+                                    LPARAM(0),
+                                );
+                            }
 
                             if cmd.0 as usize == ID_MENU_OPEN_SETTINGS {
                                 let handler = state.action_handler.lock().unwrap().clone();

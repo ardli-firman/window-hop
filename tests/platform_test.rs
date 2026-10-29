@@ -315,3 +315,35 @@ fn test_local_single_instance_coordinator_handles_open_settings_command() {
     assert_eq!(cmds.len(), 1);
     assert_eq!(cmds[0], ActivationCommand::OpenSettings);
 }
+
+#[test]
+fn test_local_single_instance_coordinator_handles_ping_command() {
+    let dir = tempdir().expect("tempdir");
+    let primary = LocalSingleInstanceCoordinator::new(dir.path().to_path_buf());
+
+    // Without primary listener: ping returns false (no running instance)
+    let ping_before = primary
+        .send_activation(&ActivationCommand::Ping)
+        .expect("ping before start");
+    assert!(!ping_before);
+
+    let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let received_clone = received.clone();
+    primary
+        .start_listener(Box::new(move |cmd| {
+            received_clone.lock().unwrap().push(cmd);
+        }))
+        .expect("start listener");
+
+    // With primary listener: secondary ping returns true
+    let secondary = LocalSingleInstanceCoordinator::new(dir.path().to_path_buf());
+    let ping_after = secondary
+        .send_activation(&ActivationCommand::Ping)
+        .expect("ping after start");
+    assert!(ping_after, "Ping to running primary must return true");
+
+    std::thread::sleep(Duration::from_millis(100));
+    let cmds = received.lock().unwrap().clone();
+    assert_eq!(cmds.len(), 1);
+    assert_eq!(cmds[0], ActivationCommand::Ping);
+}

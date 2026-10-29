@@ -5468,3 +5468,91 @@ fn test_shutdown_when_idle_succeeds_cleanly() {
     assert!(outcomes.is_empty());
     assert!(mock_tray.is_removed());
 }
+
+#[test]
+fn test_shutdown_continues_stopping_other_profiles_when_one_fails() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let monitor1 = MonitorDescriptor {
+        identity: MonitorIdentity::new(r"\\.\DISPLAY1\MONITOR1"),
+        name: "Monitor Antrian 1".to_string(),
+        is_primary: false,
+    };
+    let monitor2 = MonitorDescriptor {
+        identity: MonitorIdentity::new(r"\\.\DISPLAY2\MONITOR2"),
+        name: "Monitor Antrian 2".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![
+        monitor1.clone(),
+        monitor2.clone(),
+    ]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_shutdown_partial_failure");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+    let mock_tray = Arc::new(MockTrayProvider::new());
+    coordinator.set_tray_provider(mock_tray.clone());
+
+    // Profile 1
+    let p1_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput {
+                name: "Poli Satu".to_string(),
+                browser_path: PathBuf::from(
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                ),
+                custom_parameters: "--app=https://antrian.poli/1 --kiosk".to_string(),
+                target_monitor: Some(monitor1.identity.clone()),
+            },
+        )
+        .expect("save p1");
+    coordinator.activate_profile(&p1_id).expect("activate p1");
+
+    // Profile 2
+    let p2_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput {
+                name: "Poli Dua".to_string(),
+                browser_path: PathBuf::from(
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                ),
+                custom_parameters: "--app=https://antrian.poli/2 --kiosk".to_string(),
+                target_monitor: Some(monitor2.identity.clone()),
+            },
+        )
+        .expect("save p2");
+    coordinator.activate_profile(&p2_id).expect("activate p2");
+
+    assert_eq!(launcher.launched_processes().len(), 2);
+    let proc1 = launcher.launched_processes()[0].clone();
+    let proc2 = launcher.launched_processes()[1].clone();
+
+    // Make proc1 fail stop operations by refusing graceful close and failing force stop
+    proc1.set_refuse_graceful(true);
+    proc1.set_fail_force_stop(true);
+
+    let res = coordinator.shutdown();
+    assert!(
+        res.is_err(),
+        "shutdown should return error if one profile failed to stop"
+    );
+
+    // Crucial: coordinator must have STILL attempted and succeeded in stopping proc2!
+    assert!(
+        proc2.close_requested(),
+        "proc2 must still have been stopped even though proc1 failed"
+    );
+    assert!(!proc2.is_alive());
+
+    // Tray must be removed regardless
+    assert!(mock_tray.is_removed());
+}
