@@ -362,3 +362,85 @@ impl ProcessLauncher for WindowsProcessLauncher {
         Ok(managed)
     }
 }
+
+/// Implementasi pembuat shortcut pada platform Windows.
+pub struct WindowsShortcutCreator;
+
+impl WindowsShortcutCreator {
+    /// Membuat instance baru WindowsShortcutCreator.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for WindowsShortcutCreator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl crate::platform::ShortcutCreator for WindowsShortcutCreator {
+    fn default_desktop_dir(&self) -> Result<std::path::PathBuf, PlatformError> {
+        if let Some(userprofile) = std::env::var_os("USERPROFILE") {
+            let desktop = std::path::PathBuf::from(userprofile).join("Desktop");
+            return Ok(desktop);
+        }
+        if let Some(onedrive) = std::env::var_os("OneDrive") {
+            let desktop = std::path::PathBuf::from(onedrive).join("Desktop");
+            if desktop.exists() {
+                return Ok(desktop);
+            }
+        }
+        Err(PlatformError::Os(
+            "Tidak dapat menemukan direktori Desktop pengguna Windows".to_string(),
+        ))
+    }
+
+    fn create_shortcut(
+        &self,
+        spec: &crate::platform::ShortcutSpec,
+    ) -> Result<std::path::PathBuf, PlatformError> {
+        std::fs::create_dir_all(&spec.target_dir).map_err(|e| {
+            PlatformError::Os(format!("Gagal membuat folder tujuan shortcut: {}", e))
+        })?;
+
+        let shortcut_path = spec.shortcut_path();
+        let app_exe_str = spec.app_executable.to_string_lossy().to_string();
+        let args_str = spec.arguments.join(" ");
+        let workdir = match spec.app_executable.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => std::env::current_dir().unwrap_or_else(|_| spec.target_dir.clone()),
+        };
+
+        // Menggunakan parameter posisi PowerShell ($args[0]..$args[3]) yang dipass via Command args
+        // agar parameter tidak diinterpolasi ke string script shell dan bebas dari issue kutip/spasi.
+        let ps_script = "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut($args[0]); $s.TargetPath = $args[1]; $s.Arguments = $args[2]; $s.WorkingDirectory = $args[3]; $s.Save()";
+
+        let output = std::process::Command::new("powershell.exe")
+            .arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-Command")
+            .arg(ps_script)
+            .arg(shortcut_path.to_string_lossy().as_ref())
+            .arg(&app_exe_str)
+            .arg(&args_str)
+            .arg(workdir.to_string_lossy().as_ref())
+            .output()
+            .map_err(|e| {
+                PlatformError::Os(format!(
+                    "Gagal menjalankan powershell untuk membuat shortcut: {}",
+                    e
+                ))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(PlatformError::Os(format!(
+                "Pembuatan shortcut gagal: {}",
+                stderr
+            )));
+        }
+
+        Ok(shortcut_path)
+    }
+}

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::tempdir;
 use window_hop::application::{
     ActivationResult, ApplicationError, LifecycleCoordinator, LifecycleTransitionOutcome,
@@ -11,7 +12,9 @@ use window_hop::domain::{
 };
 use window_hop::persistence::{FileProfileStore, MemoryProfileStore};
 use window_hop::platform::{
-    Clock, ManagedProcess, MockClock, MockMonitorProvider, MockProcessLauncher, ProcessLauncher,
+    ActivationCommand, Clock, LocalSingleInstanceCoordinator, ManagedProcess, MockClock,
+    MockMonitorProvider, MockProcessLauncher, MockShortcutCreator, ProcessLauncher,
+    SingleInstanceCoordinator,
 };
 
 #[test]
@@ -4661,4 +4664,427 @@ fn test_delete_profile_persistence_failure_preserves_running_instance() {
     );
     assert!(!proc.close_requested());
     assert!(coordinator.is_profile_running(&p_id));
+}
+
+#[test]
+fn test_create_profile_shortcut_default_desktop_and_custom_folder() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let shortcut_creator = Arc::new(MockShortcutCreator::new(PathBuf::from(
+        r"C:\Users\Perawat\Desktop",
+    )));
+    let base_dir = PathBuf::from(r"C:\AppData\WindowHop");
+
+    let mut coordinator =
+        LifecycleCoordinator::with_services(store, monitor_provider, launcher, clock, base_dir);
+    coordinator.set_shortcut_creator(shortcut_creator.clone());
+
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Rawat Jalan",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local",
+            ),
+        )
+        .expect("save profile");
+
+    // 1. Create shortcut with default folder (Desktop)
+    let default_path = coordinator
+        .create_profile_shortcut(&profile_id, None)
+        .expect("create shortcut default desktop");
+
+    assert_eq!(
+        default_path,
+        PathBuf::from(r"C:\Users\Perawat\Desktop").join("Antrian Rawat Jalan.lnk")
+    );
+
+    let created = shortcut_creator.created_shortcuts();
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].profile_id, profile_id);
+    assert_eq!(created[0].profile_name, "Antrian Rawat Jalan");
+    assert_eq!(
+        created[0].target_dir,
+        PathBuf::from(r"C:\Users\Perawat\Desktop")
+    );
+    assert_eq!(
+        created[0].arguments,
+        vec![
+            "--activate-profile".to_string(),
+            profile_id.as_str().to_string()
+        ]
+    );
+
+    // 2. Create shortcut with custom alternate folder
+    let custom_dir = PathBuf::from(r"D:\Pintasan Khusus Antrian");
+    let custom_path = coordinator
+        .create_profile_shortcut(&profile_id, Some(custom_dir.clone()))
+        .expect("create shortcut custom folder");
+
+    assert_eq!(custom_path, custom_dir.join("Antrian Rawat Jalan.lnk"));
+
+    let created = shortcut_creator.created_shortcuts();
+    assert_eq!(created.len(), 2);
+    assert_eq!(created[1].target_dir, custom_dir);
+}
+
+#[test]
+fn test_create_profile_shortcut_handles_spaces_in_paths_and_carries_profile_reference() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let shortcut_creator = Arc::new(MockShortcutCreator::new(PathBuf::from(
+        r"C:\Users\Perawat Poliklinik\Desktop",
+    )));
+    let base_dir = PathBuf::from(r"C:\App Data\Window Hop");
+
+    let mut coordinator =
+        LifecycleCoordinator::with_services(store, monitor_provider, launcher, clock, base_dir);
+    coordinator.set_shortcut_creator(shortcut_creator.clone());
+
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Poli Gigi & Mulut",
+                PathBuf::from("msedge.exe"),
+                "--kiosk",
+            ),
+        )
+        .expect("save profile");
+
+    let app_exe_with_spaces = PathBuf::from(r"C:\Program Files\Window Hop\window-hop.exe");
+    let target_dir_with_spaces = PathBuf::from(r"D:\Folder Pintasan Perawat\Klinik Utama\");
+
+    let shortcut_path = coordinator
+        .create_profile_shortcut_with_exe(
+            &profile_id,
+            Some(target_dir_with_spaces.clone()),
+            app_exe_with_spaces.clone(),
+        )
+        .expect("create shortcut with spaces");
+
+    let created = shortcut_creator.created_shortcuts();
+    assert_eq!(created.len(), 1);
+    let spec = &created[0];
+
+    // Reference profile
+    assert_eq!(spec.profile_id, profile_id);
+    assert_eq!(spec.app_executable, app_exe_with_spaces);
+    assert_eq!(spec.target_dir, target_dir_with_spaces);
+
+    // Command line arguments must include profile activation flag and profile ID
+    assert_eq!(
+        spec.arguments,
+        vec![
+            "--activate-profile".to_string(),
+            profile_id.as_str().to_string()
+        ]
+    );
+
+    // Shortcut file path handles sanitized filename
+    assert!(shortcut_path
+        .to_string_lossy()
+        .contains("Antrian Poli Gigi & Mulut.lnk"));
+}
+
+#[test]
+fn test_create_profile_shortcut_fails_when_profile_not_found() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let coordinator = LifecycleCoordinator::from_store(store);
+
+    let nonexistent_id = ProfileId::generate();
+    let res = coordinator.create_profile_shortcut(&nonexistent_id, None);
+
+    assert!(res.is_err());
+    match res.unwrap_err() {
+        ApplicationError::ProfileNotFound { id } => assert_eq!(id, nonexistent_id),
+        err => panic!("expected ProfileNotFound, got: {:?}", err),
+    }
+}
+
+#[test]
+fn test_create_profile_shortcut_reports_error_when_platform_fails() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let shortcut_creator = Arc::new(MockShortcutCreator::new(PathBuf::from(r"C:\Desktop")));
+    shortcut_creator.set_error(Some("Akses folder ditolak oleh OS".to_string()));
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher,
+        clock,
+        PathBuf::from("base"),
+    );
+    coordinator.set_shortcut_creator(shortcut_creator);
+
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new("Antrian Poli THT", PathBuf::from("msedge.exe"), "--kiosk"),
+        )
+        .expect("save profile");
+
+    let res = coordinator.create_profile_shortcut(&profile_id, None);
+    assert!(res.is_err());
+    match res.unwrap_err() {
+        ApplicationError::Platform(err) => {
+            assert!(err.to_string().contains("Akses folder ditolak oleh OS"));
+        }
+        err => panic!("expected ApplicationError::Platform, got: {:?}", err),
+    }
+}
+
+#[test]
+fn test_handle_shortcut_activation_launches_profile_and_subsequent_clicks_reuse_window_without_duplicates(
+) {
+    let store = Arc::new(MemoryProfileStore::new());
+    let target_mon = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-TARGET-1"),
+        name: "Monitor Antrian 1".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![target_mon.clone()]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("base");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian IGD",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.hospital/igd",
+            )
+            .with_target_monitor(Some(target_mon.identity.clone())),
+        )
+        .expect("save profile");
+
+    // 1. First shortcut activation launches the profile
+    let result1 = coordinator
+        .handle_shortcut_activation(&profile_id)
+        .expect("first activation");
+
+    let pid1 = match result1 {
+        ActivationResult::Launched {
+            pid,
+            target_monitor,
+            ..
+        } => {
+            assert_eq!(target_monitor, target_mon);
+            pid
+        }
+        other => panic!("expected Launched result, got: {:?}", other),
+    };
+
+    assert_eq!(launcher.launched_processes().len(), 1);
+    let proc = launcher.launched_processes()[0].clone();
+    assert!(proc.is_alive());
+    assert_eq!(proc.pid(), pid1);
+    assert_eq!(proc.reposition_count(), 0);
+
+    // Simulate nurse or user accidentally moving window to another display
+    proc.reposition(&MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-PRIMARY"),
+        name: "Primary Display".to_string(),
+        is_primary: true,
+    })
+    .expect("simulate move");
+    assert_eq!(proc.reposition_count(), 1);
+
+    // 2. Second shortcut activation (repeated click) reuses the window and restores placement
+    let result2 = coordinator
+        .handle_shortcut_activation(&profile_id)
+        .expect("second activation");
+
+    match result2 {
+        ActivationResult::Reused {
+            pid,
+            target_monitor,
+            ..
+        } => {
+            assert_eq!(pid, pid1, "Must reuse same PID");
+            assert_eq!(target_monitor, target_mon);
+        }
+        other => panic!("expected Reused result, got: {:?}", other),
+    }
+
+    // No duplicate process launched!
+    assert_eq!(launcher.launched_processes().len(), 1);
+    // Reposition was called again to restore placement to target monitor
+    assert_eq!(proc.reposition_count(), 2);
+    assert_eq!(proc.current_monitor(), target_mon);
+}
+
+#[test]
+fn test_handle_shortcut_activation_when_target_monitor_unavailable_enters_waiting_state_no_fallback(
+) {
+    let store = Arc::new(MemoryProfileStore::new());
+    // Only primary monitor is available, target monitor is missing
+    let primary_mon = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-PRIMARY"),
+        name: "Primary Display".to_string(),
+        is_primary: true,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![primary_mon]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        PathBuf::from("base"),
+    );
+
+    let target_identity = MonitorIdentity::new("MON-DISCONNECTED");
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Poli Farmasi",
+                PathBuf::from("msedge.exe"),
+                "--kiosk",
+            )
+            .with_target_monitor(Some(target_identity.clone())),
+        )
+        .expect("save profile");
+
+    // Activating via shortcut when target monitor is unavailable
+    let result = coordinator
+        .handle_shortcut_activation(&profile_id)
+        .expect("activate with unavailable monitor");
+
+    match result {
+        ActivationResult::WaitingForMonitor { target_monitor } => {
+            assert_eq!(target_monitor, target_identity);
+        }
+        other => panic!("expected WaitingForMonitor, got: {:?}", other),
+    }
+
+    // Must NOT launch browser on primary!
+    assert_eq!(launcher.launched_processes().len(), 0);
+    // State is recorded as WaitingForMonitor
+    assert_eq!(
+        coordinator.get_lifecycle_state(&profile_id).unwrap(),
+        ProfileLifecycleState::WaitingForMonitor {
+            target_monitor: target_identity
+        }
+    );
+}
+
+#[test]
+fn test_handle_shortcut_activation_when_profile_missing_returns_error_status() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let mut coordinator = LifecycleCoordinator::from_store(store);
+
+    let missing_id = ProfileId::generate();
+    let res = coordinator.handle_shortcut_activation(&missing_id);
+
+    assert!(res.is_err());
+    match res.unwrap_err() {
+        ApplicationError::ProfileNotFound { id } => assert_eq!(id, missing_id),
+        err => panic!("expected ProfileNotFound, got: {:?}", err),
+    }
+
+    // Status kegagalan harus tercatat pada koordinator (teramati pada status/tray tanpa membuka jendela pengaturan)
+    assert!(coordinator.last_error().is_some());
+    assert!(coordinator
+        .last_error()
+        .unwrap()
+        .contains(&missing_id.to_string()));
+}
+
+#[test]
+fn test_shortcut_activation_through_single_instance_ipc_routes_to_coordinator() {
+    let dir = tempdir().expect("tempdir");
+    let store = Arc::new(MemoryProfileStore::new());
+    let target_mon = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE-1"),
+        name: "Queue Display".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![target_mon.clone()]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+
+    let coordinator = Arc::new(std::sync::Mutex::new(LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        dir.path().to_path_buf(),
+    )));
+
+    let profile_id = coordinator
+        .lock()
+        .unwrap()
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new("Antrian Radiologi", PathBuf::from("msedge.exe"), "--kiosk")
+                .with_target_monitor(Some(target_mon.identity.clone())),
+        )
+        .expect("save profile");
+
+    // Primary instance starts IPC listener
+    let primary_ipc = LocalSingleInstanceCoordinator::new(dir.path().to_path_buf());
+    let coord_for_listener = coordinator.clone();
+    primary_ipc
+        .start_listener(Box::new(move |command| {
+            let ActivationCommand::ActivateProfile(pid) = command;
+            let _ = coord_for_listener
+                .lock()
+                .unwrap()
+                .handle_shortcut_activation(&pid);
+        }))
+        .expect("start listener");
+
+    // Secondary instance (shortcut click) sends activation
+    let secondary_ipc = LocalSingleInstanceCoordinator::new(dir.path().to_path_buf());
+    let sent = secondary_ipc
+        .send_activation(&ActivationCommand::ActivateProfile(profile_id.clone()))
+        .expect("send activation");
+    assert!(
+        sent,
+        "Must successfully send activation to primary coordinator"
+    );
+
+    // Wait briefly for coordinator to process
+    std::thread::sleep(Duration::from_millis(150));
+
+    // Profile should now be running on target monitor
+    let is_running = coordinator.lock().unwrap().is_profile_running(&profile_id);
+    assert!(
+        is_running,
+        "Profile must be running after shortcut IPC activation"
+    );
+    assert_eq!(launcher.launched_processes().len(), 1);
+
+    // Repeated click from another secondary instance
+    let sent2 = secondary_ipc
+        .send_activation(&ActivationCommand::ActivateProfile(profile_id.clone()))
+        .expect("repeated click");
+    assert!(sent2);
+
+    std::thread::sleep(Duration::from_millis(150));
+
+    // Still only 1 process launched! (reused)
+    assert_eq!(launcher.launched_processes().len(), 1);
 }

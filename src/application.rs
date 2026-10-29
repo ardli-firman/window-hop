@@ -7,8 +7,9 @@ use crate::domain::{
 };
 use crate::persistence::{PersistenceError, ProfileStore};
 use crate::platform::{
-    default_clock, default_monitor_provider, default_process_launcher, Clock, ManagedProcess,
-    MonitorProvider, PlatformError, ProcessLauncher,
+    default_clock, default_monitor_provider, default_process_launcher, default_shortcut_creator,
+    Clock, ManagedProcess, MonitorProvider, PlatformError, ProcessLauncher, ShortcutCreator,
+    ShortcutSpec, ACTIVATE_PROFILE_FLAG,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -162,6 +163,7 @@ pub struct LifecycleCoordinator {
     monitor_provider: Arc<dyn MonitorProvider>,
     process_launcher: Arc<dyn ProcessLauncher>,
     clock: Arc<dyn Clock>,
+    shortcut_creator: Arc<dyn ShortcutCreator>,
     base_data_dir: PathBuf,
     config: AppConfig,
     active_instances: HashMap<ProfileId, ActiveProfileInstance>,
@@ -184,6 +186,7 @@ impl LifecycleCoordinator {
             monitor_provider,
             process_launcher,
             clock,
+            shortcut_creator: default_shortcut_creator(),
             base_data_dir,
             config: AppConfig::default(),
             active_instances: HashMap::new(),
@@ -418,6 +421,91 @@ impl LifecycleCoordinator {
     /// Mengambil referensi penyedia monitor.
     pub fn monitor_provider(&self) -> &Arc<dyn MonitorProvider> {
         &self.monitor_provider
+    }
+
+    /// Mengatur pembuat shortcut platform.
+    pub fn set_shortcut_creator(&mut self, shortcut_creator: Arc<dyn ShortcutCreator>) {
+        self.shortcut_creator = shortcut_creator;
+    }
+
+    /// Mengambil referensi pembuat shortcut.
+    pub fn shortcut_creator(&self) -> &Arc<dyn ShortcutCreator> {
+        &self.shortcut_creator
+    }
+
+    /// Membuat shortcut untuk profil tersimpan ke folder target (default Desktop jika None).
+    pub fn create_profile_shortcut(
+        &self,
+        id: &ProfileId,
+        custom_dir: Option<PathBuf>,
+    ) -> Result<PathBuf, ApplicationError> {
+        let app_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("window-hop.exe"));
+        self.create_profile_shortcut_with_exe(id, custom_dir, app_exe)
+    }
+
+    /// Membuat shortcut untuk profil tersimpan dengan path executable aplikasi yang ditentukan
+    /// (misal untuk verifikasi penanganan path ber-spasi atau instalasi khusus).
+    pub fn create_profile_shortcut_with_exe(
+        &self,
+        id: &ProfileId,
+        custom_dir: Option<PathBuf>,
+        app_exe: PathBuf,
+    ) -> Result<PathBuf, ApplicationError> {
+        let profile = self
+            .get_profile(id)
+            .ok_or_else(|| ApplicationError::ProfileNotFound { id: id.clone() })?;
+
+        let target_dir = match custom_dir {
+            Some(dir) => {
+                if dir.as_os_str().is_empty() {
+                    return Err(ApplicationError::ValidationError(
+                        "Folder shortcut tujuan tidak boleh kosong".to_string(),
+                    ));
+                }
+                dir
+            }
+            None => self
+                .shortcut_creator
+                .default_desktop_dir()
+                .map_err(ApplicationError::Platform)?,
+        };
+
+        let spec = ShortcutSpec {
+            profile_id: id.clone(),
+            profile_name: profile.name().to_string(),
+            target_dir,
+            app_executable: app_exe,
+            arguments: vec![ACTIVATE_PROFILE_FLAG.to_string(), id.as_str().to_string()],
+        };
+
+        self.shortcut_creator
+            .create_shortcut(&spec)
+            .map_err(ApplicationError::Platform)
+    }
+
+    /// Menangani aktivasi profil yang dipicu dari shortcut profil atau baris perintah.
+    ///
+    /// Aturan:
+    /// - Mengaktifkan profil melalui koordinator yang sama tanpa membuka jendela pengaturan.
+    /// - Jika profil sudah berjalan dengan konfigurasi yang sama, memakai kembali window yang ada
+    ///   dan memastikan penempatannya kembali ke monitor tujuan (Reused).
+    /// - Jika monitor tujuan tidak tersedia atau identitasnya ambigu, transisi ke status menunggu/ambigu
+    ///   tanpa melakukan fallback ke monitor primary.
+    /// - Jika profil tidak ditemukan atau gagal, kegagalan dicatat pada status koordinator tanpa membuka pengaturan.
+    pub fn handle_shortcut_activation(
+        &mut self,
+        id: &ProfileId,
+    ) -> Result<ActivationResult, ApplicationError> {
+        match self.activate_profile(id) {
+            Ok(result) => {
+                self.last_error = None;
+                Ok(result)
+            }
+            Err(err) => {
+                self.last_error = Some(err.to_string());
+                Err(err)
+            }
+        }
     }
 
     /// Mengambil daftar semua monitor yang terdeteksi dan aktif saat ini.
