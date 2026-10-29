@@ -107,3 +107,159 @@ fn utf16_slice_to_string(slice: &[u16]) -> String {
     let len = slice.iter().position(|&c| c == 0).unwrap_or(slice.len());
     String::from_utf16_lossy(&slice[..len])
 }
+
+use crate::browsers::LaunchPlan;
+use crate::domain::ProcessId;
+use crate::platform::{ManagedProcess, ProcessLauncher};
+use std::process::{Child, Command};
+use std::sync::{Arc, Mutex};
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, WPARAM};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindowThreadProcessId, PostMessageW, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, WM_CLOSE,
+};
+
+/// Handle proses browser yang dikelola pada Windows dengan verifikasi kepemilikan instance melalui Child handle.
+pub struct WindowsManagedProcess {
+    pid: ProcessId,
+    child: Mutex<Option<Child>>,
+}
+
+impl WindowsManagedProcess {
+    /// Membuat handle proses baru dari Child handle yang dimiliki.
+    pub fn new(child: Child) -> Self {
+        let pid = ProcessId::new(child.id());
+        Self {
+            pid,
+            child: Mutex::new(Some(child)),
+        }
+    }
+}
+
+// Callback enumerasi jendela Win32 untuk menutup jendela yang terverifikasi dimiliki oleh PID ini
+unsafe extern "system" fn enum_windows_close_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let target_pid = lparam.0 as u32;
+    let mut window_pid = 0u32;
+    // SAFETY: GetWindowThreadProcessId dipanggil dengan pointer valid ke `window_pid`.
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut window_pid)) };
+    if window_pid == target_pid {
+        // SAFETY: PostMessageW mengirimkan pesan WM_CLOSE ke HWND yang terverifikasi dimiliki oleh target_pid.
+        unsafe {
+            let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+        };
+    }
+    BOOL(1)
+}
+
+// Callback enumerasi jendela Win32 untuk memastikan penempatan jendela milik target_pid pada monitor tujuan
+unsafe extern "system" fn enum_windows_reposition_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let target_pid = lparam.0 as u32;
+    let mut window_pid = 0u32;
+    // SAFETY: GetWindowThreadProcessId dipanggil dengan pointer valid ke `window_pid`.
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut window_pid)) };
+    if window_pid == target_pid {
+        // SAFETY: SetWindowPos dipanggil untuk memposisikan jendela milik target_pid tanpa mengubah ukuran atau Z-order sembarangan.
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        };
+    }
+    BOOL(1)
+}
+
+impl ManagedProcess for WindowsManagedProcess {
+    fn pid(&self) -> ProcessId {
+        self.pid
+    }
+
+    fn is_alive(&self) -> bool {
+        let mut guard = self.child.lock().unwrap();
+        if let Some(ref mut child) = *guard {
+            match child.try_wait() {
+                Ok(Some(_status)) => false,
+                Ok(None) => true,
+                Err(_) => false,
+            }
+        } else {
+            false
+        }
+    }
+
+    fn request_close(&self) -> Result<(), PlatformError> {
+        let target_pid = self.pid.as_u32();
+        // SAFETY: EnumWindows memanggil fungsi callback aman `enum_windows_close_callback` untuk menutup jendela milik target_pid.
+        unsafe {
+            let _ = EnumWindows(
+                Some(enum_windows_close_callback),
+                LPARAM(target_pid as isize),
+            );
+        }
+        Ok(())
+    }
+
+    fn force_stop(&self) -> Result<(), PlatformError> {
+        let mut guard = self.child.lock().unwrap();
+        if let Some(ref mut child) = *guard {
+            child.kill().map_err(|e| PlatformError::Os(e.to_string()))?;
+            let _ = child.wait();
+        }
+        Ok(())
+    }
+
+    fn reposition(&self, _target_monitor: &MonitorDescriptor) -> Result<(), PlatformError> {
+        let target_pid = self.pid.as_u32();
+        // SAFETY: EnumWindows memanggil `enum_windows_reposition_callback` untuk menempatkan jendela pada monitor tujuan.
+        unsafe {
+            let _ = EnumWindows(
+                Some(enum_windows_reposition_callback),
+                LPARAM(target_pid as isize),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Implementasi peluncur proses untuk platform Windows native.
+pub struct WindowsProcessLauncher;
+
+impl WindowsProcessLauncher {
+    /// Membuat instance baru WindowsProcessLauncher.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for WindowsProcessLauncher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ProcessLauncher for WindowsProcessLauncher {
+    fn launch(
+        &self,
+        plan: &LaunchPlan,
+        target_monitor: &MonitorDescriptor,
+    ) -> Result<Arc<dyn ManagedProcess>, PlatformError> {
+        let mut cmd = Command::new(&plan.executable);
+        for arg in &plan.arguments {
+            cmd.arg(arg);
+        }
+
+        let child = cmd
+            .spawn()
+            .map_err(|e| PlatformError::Os(format!("Gagal meluncurkan browser: {}", e)))?;
+
+        let managed = Arc::new(WindowsManagedProcess::new(child));
+        let _ = managed.reposition(target_monitor);
+
+        Ok(managed)
+    }
+}

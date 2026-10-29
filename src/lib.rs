@@ -1,4 +1,5 @@
 pub mod application;
+pub mod browsers;
 pub mod domain;
 pub mod persistence;
 pub mod platform;

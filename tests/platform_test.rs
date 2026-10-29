@@ -1,5 +1,11 @@
-use window_hop::domain::{MonitorDescriptor, MonitorIdentity};
-use window_hop::platform::{MockMonitorProvider, MonitorProvider, PlatformError};
+use std::path::PathBuf;
+use std::time::Duration;
+use window_hop::browsers::{LaunchPlan, LoginRetentionNote};
+use window_hop::domain::{MonitorDescriptor, MonitorIdentity, ProcessId};
+use window_hop::platform::{
+    Clock, MockClock, MockMonitorProvider, MockProcessLauncher, MonitorProvider, PlatformError,
+    ProcessLauncher,
+};
 
 #[test]
 fn test_mock_monitor_provider_returns_configured_monitors() {
@@ -40,4 +46,53 @@ fn test_mock_monitor_provider_can_simulate_platform_errors() {
         PlatformError::Os(msg) => assert!(msg.contains("Gagal enumerasi display")),
         other => panic!("expected PlatformError::Os, got {:?}", other),
     }
+}
+
+#[test]
+fn test_mock_process_launcher_and_managed_process() {
+    let launcher = MockProcessLauncher::new();
+    let monitor = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE"),
+        name: "Queue Display".to_string(),
+        is_primary: false,
+    };
+    let plan = LaunchPlan {
+        executable: PathBuf::from("msedge.exe"),
+        arguments: vec!["--user-data-dir=data".to_string(), "--kiosk".to_string()],
+        user_data_dir: PathBuf::from("data"),
+        login_retention: LoginRetentionNote::KioskOrInPrivateNoRetention {
+            explanation: "test".to_string(),
+        },
+    };
+
+    let process = launcher.launch(&plan, &monitor).expect("launch process");
+    assert_eq!(process.pid(), ProcessId::new(1001));
+    assert!(process.is_alive());
+
+    // Reposition to a new monitor
+    let other_monitor = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-OTHER"),
+        name: "Other Display".to_string(),
+        is_primary: true,
+    };
+    process.reposition(&other_monitor).expect("reposition");
+
+    // Graceful close (proses kooperatif berhenti)
+    process.request_close().expect("request close");
+    assert!(!process.is_alive());
+
+    // Force stop (proses yang macet atau butuh force kill)
+    let proc2 = launcher.launch(&plan, &monitor).expect("launch proc2");
+    assert!(proc2.is_alive());
+    proc2.force_stop().expect("force stop");
+    assert!(!proc2.is_alive());
+}
+
+#[test]
+fn test_mock_clock_advancement() {
+    let clock = MockClock::new();
+    let t0 = clock.now();
+    clock.advance(Duration::from_secs(3));
+    let t1 = clock.now();
+    assert_eq!(t1.duration_since(t0), Duration::from_secs(3));
 }
