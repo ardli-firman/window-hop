@@ -22,6 +22,7 @@ pub struct WindowHopView {
     cached_profiles: Vec<Profile>,
     cached_lifecycle_states: HashMap<ProfileId, ProfileLifecycleState>,
     cached_running_ids: HashSet<ProfileId>,
+    cached_has_running_changes: HashSet<ProfileId>,
     is_busy: bool,
     selected_profile_id: Option<ProfileId>,
     selected_target_monitor: Option<MonitorIdentity>,
@@ -33,6 +34,7 @@ pub struct WindowHopView {
     params_input: Entity<InputState>,
     status_message: Option<String>,
     is_error: bool,
+    confirming_delete_profile: Option<ProfileId>,
 }
 
 impl WindowHopView {
@@ -78,12 +80,18 @@ impl WindowHopView {
             .filter(|p| coordinator.is_profile_running(p.id()))
             .map(|p| p.id().clone())
             .collect();
+        let cached_has_running_changes = cached_profiles
+            .iter()
+            .filter(|p| coordinator.has_running_config_changes(p.id()))
+            .map(|p| p.id().clone())
+            .collect();
 
         Self {
             coordinator: Arc::new(Mutex::new(coordinator)),
             cached_profiles,
             cached_lifecycle_states,
             cached_running_ids,
+            cached_has_running_changes,
             is_busy: false,
             selected_profile_id: None,
             selected_target_monitor: None,
@@ -95,6 +103,7 @@ impl WindowHopView {
             params_input,
             status_message: initial_error,
             is_error,
+            confirming_delete_profile: None,
         }
     }
 
@@ -117,6 +126,12 @@ impl WindowHopView {
             .cached_profiles
             .iter()
             .filter(|p| coord.is_profile_running(p.id()))
+            .map(|p| p.id().clone())
+            .collect();
+        self.cached_has_running_changes = self
+            .cached_profiles
+            .iter()
+            .filter(|p| coord.has_running_config_changes(p.id()))
             .map(|p| p.id().clone())
             .collect();
     }
@@ -151,6 +166,7 @@ impl WindowHopView {
         self.selected_profile_id = id.clone();
         self.status_message = None;
         self.is_error = false;
+        self.confirming_delete_profile = None;
 
         // Segarkan cache monitor dan profil saat memilih profil jika koordinator tidak terkunci
         let coordinator_arc = self.coordinator.clone();
@@ -428,6 +444,197 @@ impl WindowHopView {
                             Err(err) => {
                                 view.status_message =
                                     Some(format!("Gagal menghentikan profil: {}", err));
+                                view.is_error = true;
+                            }
+                        }
+                        cx.notify();
+                    });
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Menjalankan ulang profil yang sedang dipilih melalui LifecycleCoordinator.
+    /// Dijalankan di background executor untuk menjaga kelancaran antarmuka pengguna.
+    pub fn restart_selected_profile(&mut self, cx: &mut Context<Self>) {
+        if self.is_busy {
+            return;
+        }
+        let Some(ref pid) = self.selected_profile_id else {
+            return;
+        };
+
+        self.is_busy = true;
+        let pid = pid.clone();
+        let coordinator = self.coordinator.clone();
+        self.status_message = Some("Menjalankan ulang profil...".to_string());
+        self.is_error = false;
+        cx.notify();
+
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                let coord_for_task = coordinator.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { coord_for_task.lock().unwrap().restart_profile(&pid) })
+                    .await;
+
+                cx.update(|cx| {
+                    let _ = this.update(cx, |view, cx| {
+                        view.is_busy = false;
+                        if let Ok(coord) = coordinator.try_lock() {
+                            view.sync_cache_from_coordinator(&coord);
+                        }
+                        match result {
+                            Ok(ActivationResult::Launched { target_monitor, .. }) => {
+                                view.status_message = Some(format!(
+                                    "Profil berhasil dijalankan ulang dengan konfigurasi terbaru pada monitor '{}'.",
+                                    target_monitor.name
+                                ));
+                                view.is_error = false;
+                            }
+                            Ok(ActivationResult::WaitingForMonitor { target_monitor }) => {
+                                view.status_message = Some(format!(
+                                    "Monitor tujuan '{}' belum tersedia. Profil menunggu monitor tersambung.",
+                                    target_monitor
+                                ));
+                                view.is_error = false;
+                            }
+                            Ok(ActivationResult::Reused { target_monitor, .. }) => {
+                                view.status_message = Some(format!(
+                                    "Profil sudah aktif pada monitor '{}'.",
+                                    target_monitor.name
+                                ));
+                                view.is_error = false;
+                            }
+                            Err(err) => {
+                                view.status_message =
+                                    Some(format!("Gagal menjalankan ulang profil: {}", err));
+                                view.is_error = true;
+                            }
+                        }
+                        cx.notify();
+                    });
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Memulai permintaan penghapusan profil yang sedang dipilih.
+    /// Jika profil sedang berjalan aktif, meminta konfirmasi terlebih dahulu (User Story 36).
+    /// Jika profil tidak aktif (draft/idle), langsung menjalankan penghapusan.
+    pub fn request_delete_selected_profile(&mut self, cx: &mut Context<Self>) {
+        if self.is_busy {
+            return;
+        }
+        let Some(ref pid) = self.selected_profile_id else {
+            return;
+        };
+
+        let is_running = self.cached_running_ids.contains(pid);
+        if is_running {
+            // Minta konfirmasi sebelum menghapus profil aktif
+            self.confirming_delete_profile = Some(pid.clone());
+            self.status_message = None;
+            self.is_error = false;
+            cx.notify();
+        } else {
+            self.execute_delete_profile(pid.clone(), cx);
+        }
+    }
+
+    /// Membatalkan konfirmasi penghapusan profil aktif tanpa mengubah tayangan maupun data profil.
+    fn cancel_delete_profile(&mut self, cx: &mut Context<Self>) {
+        self.confirming_delete_profile = None;
+        cx.notify();
+    }
+
+    /// Menjalankan penghapusan profil di background thread dengan penutupan instance 3 detik.
+    fn execute_delete_profile(&mut self, pid: ProfileId, cx: &mut Context<Self>) {
+        if self.is_busy {
+            return;
+        }
+        self.confirming_delete_profile = None;
+        self.is_busy = true;
+
+        let profile_name = self
+            .cached_profiles
+            .iter()
+            .find(|p| p.id() == &pid)
+            .map(|p| p.name().to_string())
+            .unwrap_or_else(|| pid.to_string());
+
+        let coordinator = self.coordinator.clone();
+        let target_pid = pid.clone();
+        self.status_message = Some(format!("Menghapus profil '{}'...", profile_name));
+        self.is_error = false;
+        cx.notify();
+
+        let window_handle = self.window_handle;
+        let name_input = self.name_input.clone();
+        let path_input = self.path_input.clone();
+        let params_input = self.params_input.clone();
+
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                let coord_for_task = coordinator.clone();
+                let pid_to_delete = target_pid.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        coord_for_task
+                            .lock()
+                            .unwrap()
+                            .delete_profile(&pid_to_delete)
+                    })
+                    .await;
+
+                cx.update(|cx| {
+                    let _ = this.update(cx, |view, cx| {
+                        view.is_busy = false;
+                        if let Ok(coord) = coordinator.try_lock() {
+                            view.sync_cache_from_coordinator(&coord);
+                        }
+
+                        match result {
+                            Ok(stop_outcome) => {
+                                // Bersihkan formulir dan seleksi profil
+                                view.selected_profile_id = None;
+                                view.selected_target_monitor = None;
+                                let _ = window_handle.update(cx, |_view, window, cx| {
+                                    name_input.update(cx, |input, cx| {
+                                        input.set_value("", window, cx);
+                                    });
+                                    path_input.update(cx, |input, cx| {
+                                        input.set_value("", window, cx);
+                                    });
+                                    params_input.update(cx, |input, cx| {
+                                        input.set_value("", window, cx);
+                                    });
+                                });
+
+                                let stop_detail = match stop_outcome {
+                                    StopOutcome::Graceful { .. } => {
+                                        " dan jendela browser berhasil ditutup secara normal."
+                                    }
+                                    StopOutcome::Forced { .. } => {
+                                        " dan jendela browser dihentikan paksa setelah batas tenggat 3 detik."
+                                    }
+                                    StopOutcome::NotRunning => ".",
+                                };
+                                view.status_message = Some(format!(
+                                    "Profil '{}' berhasil dihapus{}",
+                                    profile_name, stop_detail
+                                ));
+                                view.is_error = false;
+                            }
+                            Err(err) => {
+                                view.status_message =
+                                    Some(format!("Gagal menghapus profil: {}", err));
                                 view.is_error = true;
                             }
                         }
@@ -958,7 +1165,9 @@ impl Render for WindowHopView {
                             .when_some(self.selected_profile_id.as_ref(), |this, pid| {
                                 let is_active = self.cached_running_ids.contains(pid);
                                 if is_active {
-                                    this.child(
+                                    let has_changes = self.cached_has_running_changes.contains(pid);
+
+                                    let mut container = v_flex().gap_2().child(
                                         div()
                                             .p_3()
                                             .rounded_md()
@@ -968,7 +1177,37 @@ impl Render for WindowHopView {
                                             .text_xs()
                                             .text_color(theme.primary)
                                             .child("● Profil ini sedang aktif berjalan pada monitor tujuan."),
-                                    )
+                                    );
+
+                                    if has_changes {
+                                        container = container.child(
+                                            div()
+                                                .id("notice-unapplied-changes")
+                                                .p_3()
+                                                .rounded_md()
+                                                .bg(theme.warning.opacity(0.12))
+                                                .border_1()
+                                                .border_color(theme.warning)
+                                                .child(
+                                                    v_flex()
+                                                        .gap_1()
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .font_weight(FontWeight::BOLD)
+                                                                .text_color(theme.warning)
+                                                                .child("ℹ Perubahan Konfigurasi Belum Diterapkan"),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .child("Konfigurasi profil telah diubah dan disimpan, tetapi tayangan antrian saat ini masih menggunakan konfigurasi lama. Klik 'Jalankan Ulang' untuk menerapkan konfigurasi terbaru ke monitor tujuan."),
+                                                        ),
+                                                ),
+                                        );
+                                    }
+
+                                    this.child(container)
                                 } else {
                                     // Periksa apakah ada profil lain yang sedang aktif di monitor tujuan yang sama
                                     let conflicting_profile = if let Some(ref target_id) = self.selected_target_monitor {
@@ -1001,6 +1240,85 @@ impl Render for WindowHopView {
                                     }
                                 }
                             })
+                            // Dialog Konfirmasi Penghapusan Profil Aktif
+                            .when_some(self.confirming_delete_profile.clone(), |this, confirm_pid| {
+                                let p_name = self
+                                    .cached_profiles
+                                    .iter()
+                                    .find(|p| p.id() == &confirm_pid)
+                                    .map(|p| p.name().to_string())
+                                    .unwrap_or_else(|| confirm_pid.to_string());
+                                let p_mon = self
+                                    .cached_lifecycle_states
+                                    .get(&confirm_pid)
+                                    .and_then(|st| match st {
+                                        ProfileLifecycleState::Running { target_monitor, .. } => {
+                                            Some(format!("monitor '{}'", target_monitor.name))
+                                        }
+                                        _ => None,
+                                    })
+                                    .unwrap_or_else(|| "monitor tujuan".to_string());
+
+                                this.child(
+                                    div()
+                                        .id("delete-confirmation-banner")
+                                        .p_4()
+                                        .rounded_lg()
+                                        .border_2()
+                                        .border_color(theme.danger)
+                                        .bg(theme.danger.opacity(0.12))
+                                        .child(
+                                            v_flex()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .font_weight(FontWeight::BOLD)
+                                                        .text_color(theme.danger)
+                                                        .child("⚠ Konfirmasi Penghapusan Profil Aktif"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .child(format!(
+                                                            "Profil '{}' sedang aktif berjalan di {}. Menghapus profil ini akan menutup jendela browser yang sedang tayang (dengan batas tenggat 3 detik) dan menghapus konfigurasinya secara permanen.",
+                                                            p_name, p_mon
+                                                        )),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(theme.muted_foreground)
+                                                        .child("Apakah Anda yakin ingin menghapus profil ini? Tindakan ini tidak dapat dibatalkan."),
+                                                )
+                                                .child(
+                                                    h_flex()
+                                                        .gap_3()
+                                                        .mt_1()
+                                                        .child(
+                                                            Button::new("btn-confirm-delete")
+                                                                .danger()
+                                                                .label(if is_busy {
+                                                                    "Menghapus..."
+                                                                } else {
+                                                                    "Ya, Hapus Profil & Tutup Jendela"
+                                                                })
+                                                                .disabled(is_busy)
+                                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                                    this.execute_delete_profile(confirm_pid.clone(), cx);
+                                                                })),
+                                                        )
+                                                        .child(
+                                                            Button::new("btn-cancel-delete")
+                                                                .label("Batal")
+                                                                .disabled(is_busy)
+                                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                                    this.cancel_delete_profile(cx);
+                                                                })),
+                                                        ),
+                                                ),
+                                        ),
+                                )
+                            })
                             // Tombol Aksi
                             .child({
                                 let is_running = self
@@ -1008,6 +1326,14 @@ impl Render for WindowHopView {
                                     .as_ref()
                                     .map(|id| self.cached_running_ids.contains(id))
                                     .unwrap_or(false);
+
+                                let has_changes = self
+                                    .selected_profile_id
+                                    .as_ref()
+                                    .map(|pid| self.cached_has_running_changes.contains(pid))
+                                    .unwrap_or(false);
+
+                                let is_confirming_delete = self.confirming_delete_profile.is_some();
 
                                 h_flex()
                                     .gap_3()
@@ -1018,7 +1344,7 @@ impl Render for WindowHopView {
                                             } else {
                                                 "Simpan Profil"
                                             })
-                                            .disabled(is_busy)
+                                            .disabled(is_busy || is_confirming_delete)
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 this.save_profile(window, cx);
                                             })),
@@ -1032,7 +1358,7 @@ impl Render for WindowHopView {
                                                 } else {
                                                     "Aktifkan Profil"
                                                 })
-                                                .disabled(is_busy)
+                                                .disabled(is_busy || is_confirming_delete)
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.activate_selected_profile(cx);
                                                 })),
@@ -1040,6 +1366,19 @@ impl Render for WindowHopView {
                                     })
                                     .when(self.selected_profile_id.is_some() && is_running, |this| {
                                         this.child(
+                                            Button::new("btn-restart-profile")
+                                                .when(has_changes, |btn| btn.primary())
+                                                .label(if is_busy {
+                                                    "Memproses..."
+                                                } else {
+                                                    "Jalankan Ulang"
+                                                })
+                                                .disabled(is_busy || is_confirming_delete)
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.restart_selected_profile(cx);
+                                                })),
+                                        )
+                                        .child(
                                             Button::new("btn-stop-profile")
                                                 .danger()
                                                 .label(if is_busy {
@@ -1047,16 +1386,27 @@ impl Render for WindowHopView {
                                                 } else {
                                                     "Hentikan Profil"
                                                 })
-                                                .disabled(is_busy)
+                                                .disabled(is_busy || is_confirming_delete)
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.stop_selected_profile(cx);
+                                                })),
+                                        )
+                                    })
+                                    .when(self.selected_profile_id.is_some(), |this| {
+                                        this.child(
+                                            Button::new("btn-delete-profile")
+                                                .danger()
+                                                .label("Hapus Profil")
+                                                .disabled(is_busy || is_confirming_delete)
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.request_delete_selected_profile(cx);
                                                 })),
                                         )
                                     })
                                     .child(
                                         Button::new("btn-reset-form")
                                             .label("Reset")
-                                            .disabled(is_busy)
+                                            .disabled(is_busy || is_confirming_delete)
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 let id = this.selected_profile_id.clone();
                                                 this.select_profile(id, window, cx);

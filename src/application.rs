@@ -45,6 +45,23 @@ struct ActiveProfileInstance {
     stopping: bool,
 }
 
+impl ActiveProfileInstance {
+    /// Memeriksa apakah konfigurasi instance yang sedang berjalan identik dengan konfigurasi profil
+    /// dan deskriptor monitor tujuan yang diberikan.
+    fn matches_config(&self, profile: &Profile, target_desc: &MonitorDescriptor) -> bool {
+        self.launch_browser_path == *profile.browser_path()
+            && self.launch_parameters == profile.custom_parameters()
+            && self.target_monitor == *target_desc
+    }
+
+    /// Memeriksa apakah konfigurasi instance yang sedang berjalan identik dengan konfigurasi profil tersimpan.
+    fn matches_saved_profile(&self, profile: &Profile) -> bool {
+        self.launch_browser_path == *profile.browser_path()
+            && self.launch_parameters == profile.custom_parameters()
+            && Some(&self.target_monitor.identity) == profile.target_monitor()
+    }
+}
+
 /// Hasil operasi penghentian profil.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopOutcome {
@@ -576,7 +593,11 @@ impl LifecycleCoordinator {
                 return Err(ApplicationError::DraftNotReady { id: id.clone() });
             }
             TargetMonitorStatus::Unavailable { recorded_identity } => {
-                // Monitor tujuan belum tersedia: masuk status menunggu tanpa meluncurkan browser
+                // Monitor tujuan belum tersedia: jika ada instance lama yang sedang berjalan (karena konfigurasi diubah),
+                // hentikan instance lama tersebut terlebih dahulu sebelum masuk status menunggu.
+                if self.is_profile_running(id) {
+                    self.stop_profile(id)?;
+                }
                 self.lifecycle_states.insert(
                     id.clone(),
                     ProfileLifecycleState::WaitingForMonitor {
@@ -603,11 +624,7 @@ impl LifecycleCoordinator {
         // Periksa apakah instance profil sudah berjalan (reuse window)
         if let Some(existing) = self.active_instances.get(id) {
             if existing.process.is_alive() {
-                let is_same_config = existing.launch_browser_path == *profile.browser_path()
-                    && existing.launch_parameters == profile.custom_parameters()
-                    && existing.target_monitor == target_desc;
-
-                if is_same_config {
+                if existing.matches_config(&profile, &target_desc) {
                     existing
                         .process
                         .reposition(&target_desc)
@@ -671,6 +688,112 @@ impl LifecycleCoordinator {
             target_monitor: target_desc,
             login_retention,
         })
+    }
+
+    /// Menjalankan ulang (restart) profil dengan konfigurasi tersimpan terbaru secara sengaja.
+    ///
+    /// Aturan:
+    /// - Memvalidasi konfigurasi terlebih dahulu (browser, parameter kustom, status monitor).
+    ///   Jika validasi gagal, instance yang sedang berjalan tetap aman dan tidak dihentikan secara prematur.
+    /// - Jika profil sedang berjalan aktif, menghentikan instance yang sedang berjalan terlebih dahulu
+    ///   dengan penutupan normal dan batas tenggat 3 detik.
+    /// - Meluncurkan instance proses baru dengan konfigurasi tersimpan terbaru pada monitor tujuan.
+    /// - Jika monitor tujuan belum tersedia, profil masuk ke status `WaitingForMonitor`.
+    pub fn restart_profile(
+        &mut self,
+        id: &ProfileId,
+    ) -> Result<ActivationResult, ApplicationError> {
+        let profile = self
+            .get_profile(id)
+            .ok_or_else(|| ApplicationError::ProfileNotFound { id: id.clone() })?
+            .clone();
+
+        if profile.target_monitor().is_none() {
+            return Err(ApplicationError::DraftNotReady { id: id.clone() });
+        }
+
+        // 1. Validasi kapabilitas browser dan parameter sebelum mematikan proses aktif
+        let adapter = match crate::browsers::detect_browser_support(profile.browser_path()) {
+            crate::browsers::BrowserSupportStatus::Verified(adapter) => adapter,
+            crate::browsers::BrowserSupportStatus::Unverified => {
+                return Err(ApplicationError::BrowserNotVerified(
+                    profile.browser_path().display().to_string(),
+                    format!(
+                        "Dukungan pemisahan sesi dan kepemilikan instance untuk browser '{}' belum diverifikasi.",
+                        profile.browser_path().display()
+                    ),
+                ));
+            }
+        };
+        adapter.validate_custom_parameters(profile.custom_parameters())?;
+
+        // 2. Validasi evaluasi monitor: jika ambigu, tolak tanpa mematikan tayangan aktif
+        let monitors = self.available_monitors()?;
+        match profile.evaluate_target_monitor(&monitors) {
+            TargetMonitorStatus::Unset => {
+                return Err(ApplicationError::DraftNotReady { id: id.clone() });
+            }
+            TargetMonitorStatus::Ambiguous {
+                recorded_identity,
+                match_count,
+            } => {
+                return Err(ApplicationError::TargetMonitorAmbiguous {
+                    id: id.clone(),
+                    recorded_identity,
+                    match_count,
+                });
+            }
+            _ => {}
+        }
+
+        // 3. Setelah validasi lolos, hentikan instance lama jika sedang berjalan
+        if self.is_profile_running(id) {
+            self.stop_profile(id)?;
+        }
+
+        self.activate_profile(id)
+    }
+
+    /// Menghapus profil dari konfigurasi dan penyimpanan secara permanen.
+    ///
+    /// Aturan:
+    /// - Menyimpan perubahan penghapusan ke penyimpanan (store) terlebih dahulu agar jika terjadi kegagalan I/O,
+    ///   instance aktif tidak dimatikan secara sia-sia.
+    /// - Jika profil sedang berjalan aktif, menghentikan instance proses milik profil
+    ///   dengan penutupan normal dan batas tenggat 3 detik (force stop hanya jika tidak responsif).
+    /// - Menghapus seluruh status siklus hidup runtime profil sehingga tidak memicu pemulihan reconnect.
+    /// - Mengembalikan StopOutcome untuk memberi tahu status penghentian proses (Graceful, Forced, atau NotRunning).
+    pub fn delete_profile(&mut self, id: &ProfileId) -> Result<StopOutcome, ApplicationError> {
+        if self.load_failed {
+            let reason = self
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "Gagal memuat konfigurasi awal".to_string());
+            return Err(ApplicationError::BlockedByCorruptState(reason));
+        }
+
+        if self.get_profile(id).is_none() {
+            return Err(ApplicationError::ProfileNotFound { id: id.clone() });
+        }
+
+        // 1. Buat kandidat konfigurasi tanpa profil yang dihapus dan simpan ke store terlebih dahulu
+        let mut candidate_config = self.config.clone();
+        candidate_config.profiles_mut().retain(|p| p.id() != id);
+        self.store.save(&candidate_config)?;
+
+        // 2. Setelah penyimpanan terkonfirmasi berhasil, hentikan proses yang sedang aktif jika ada
+        let stop_outcome = if self.is_profile_running(id) {
+            self.stop_profile(id)?
+        } else {
+            StopOutcome::NotRunning
+        };
+
+        // 3. Komit ke in-memory state
+        self.config = candidate_config;
+        self.active_instances.remove(id);
+        self.lifecycle_states.remove(id);
+        self.last_error = None;
+        Ok(stop_outcome)
     }
 
     /// Meluncurkan instance proses baru untuk profil pada monitor tujuan yang diberikan.
@@ -834,6 +957,11 @@ impl LifecycleCoordinator {
             match state {
                 ProfileLifecycleState::WaitingForMonitor { target_monitor }
                 | ProfileLifecycleState::Disconnected { target_monitor } => {
+                    // Hanya pulihkan jika monitor yang kembali tersambung/menunggu masih sesuai dengan target profil tersimpan
+                    if profile.target_monitor() != Some(&target_monitor) {
+                        continue;
+                    }
+
                     let eval =
                         TargetMonitorStatus::evaluate(Some(&target_monitor), available_monitors);
                     if let TargetMonitorStatus::Available(desc) = eval {
@@ -909,6 +1037,23 @@ impl LifecycleCoordinator {
             .get(id)
             .map(|inst| inst.process.is_alive())
             .unwrap_or(false)
+    }
+
+    /// Memeriksa apakah konfigurasi tersimpan saat ini memiliki perbedaan dibanding konfigurasi
+    /// yang sedang berjalan pada instance aktif (misal: parameter, browser executable, atau monitor tujuan diubah).
+    /// Mengembalikan false jika profil tidak sedang berjalan aktif.
+    pub fn has_running_config_changes(&self, id: &ProfileId) -> bool {
+        let Some(profile) = self.get_profile(id) else {
+            return false;
+        };
+        let Some(active) = self.active_instances.get(id) else {
+            return false;
+        };
+        if !active.process.is_alive() {
+            return false;
+        }
+
+        !active.matches_saved_profile(profile)
     }
 
     /// Menemukan profil lain yang saat ini sedang aktif berjalan pada monitor tertentu.
