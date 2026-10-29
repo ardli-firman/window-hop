@@ -151,6 +151,82 @@ impl fmt::Display for TargetMonitorStatus {
     }
 }
 
+/// Alasan penghentian proses browser profil.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ExitReason {
+    /// Browser crash (terminasi abnormal / kode keluar non-nol).
+    Crash,
+    /// Browser ditutup secara manual oleh pengguna.
+    ManualClose,
+}
+
+impl fmt::Display for ExitReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Crash => write!(f, "Crash"),
+            Self::ManualClose => write!(f, "Ditutup Manual"),
+        }
+    }
+}
+
+/// Status siklus hidup runtime suatu profil yang dikelola Window Hop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProfileLifecycleState {
+    /// Profil tidak sedang aktif atau berjalan.
+    Idle,
+    /// Profil diminta aktif namun monitor tujuannya belum tersedia;
+    /// menunggu monitor yang cocok tanpa meluncurkan browser.
+    WaitingForMonitor { target_monitor: MonitorIdentity },
+    /// Profil sedang berjalan aktif pada monitor tujuan.
+    Running {
+        pid: ProcessId,
+        target_monitor: MonitorDescriptor,
+    },
+    /// Profil dihentikan karena monitor tujuannya terputus;
+    /// memenuhi syarat pemulihan otomatis saat monitor dengan identitas yang sama tersambung kembali.
+    Disconnected { target_monitor: MonitorIdentity },
+    /// Profil berhenti karena browser crash atau ditutup manual;
+    /// pemulihan otomatis reconnect dinonaktifkan (tidak ada retry loop).
+    Exited { reason: ExitReason },
+}
+
+impl ProfileLifecycleState {
+    /// Apakah profil sedang berjalan aktif.
+    pub fn is_running(&self) -> bool {
+        matches!(self, Self::Running { .. })
+    }
+
+    /// Apakah profil memenuhi syarat untuk pemulihan otomatis saat monitor tersambung kembali.
+    pub fn can_reconnect_restore(&self, monitor_id: &MonitorIdentity) -> bool {
+        match self {
+            Self::WaitingForMonitor { target_monitor } => target_monitor == monitor_id,
+            Self::Disconnected { target_monitor } => target_monitor == monitor_id,
+            Self::Idle | Self::Running { .. } | Self::Exited { .. } => false,
+        }
+    }
+}
+
+impl fmt::Display for ProfileLifecycleState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Idle => write!(f, "Tidak Aktif"),
+            Self::WaitingForMonitor { target_monitor } => {
+                write!(f, "Menunggu Monitor ({})", target_monitor)
+            }
+            Self::Running {
+                pid,
+                target_monitor,
+            } => {
+                write!(f, "Berjalan di {} ({})", target_monitor.name, pid)
+            }
+            Self::Disconnected { target_monitor } => {
+                write!(f, "Monitor Terputus ({})", target_monitor)
+            }
+            Self::Exited { reason } => write!(f, "Berhenti ({})", reason),
+        }
+    }
+}
+
 /// Status kesiapan atau siklus hidup suatu profil.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProfileStatus {
