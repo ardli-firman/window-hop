@@ -2634,3 +2634,803 @@ fn test_reconnect_error_in_one_profile_does_not_block_restoration_of_other_profi
     );
     assert!(coordinator.last_error().is_some());
 }
+
+#[test]
+fn test_activate_profile_on_same_monitor_stops_previous_profile_before_launching_new_profile() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let queue_mon = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE-1"),
+        name: "Queue Display 1".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![
+        MonitorDescriptor {
+            identity: MonitorIdentity::new("MON-PRIMARY"),
+            name: "Workstation Main Display".to_string(),
+            is_primary: true,
+        },
+        queue_mon.clone(),
+    ]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_switch");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+
+    let p_a_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Poli Gigi",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local/gigi",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-1"))),
+        )
+        .expect("save p_a");
+
+    let p_b_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Poli Anak",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local/anak",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-1"))),
+        )
+        .expect("save p_b");
+
+    // 1. Activate profile A
+    let res_a = coordinator.activate_profile(&p_a_id).expect("activate p_a");
+    let pid_a = match res_a {
+        ActivationResult::Launched { pid, .. } => pid,
+        _ => panic!("expected Launched for p_a"),
+    };
+
+    assert_eq!(
+        coordinator.get_lifecycle_state(&p_a_id).unwrap(),
+        ProfileLifecycleState::Running {
+            pid: pid_a,
+            target_monitor: queue_mon.clone(),
+        }
+    );
+    assert_eq!(
+        coordinator.get_lifecycle_state(&p_b_id).unwrap(),
+        ProfileLifecycleState::Idle
+    );
+
+    let proc_a = launcher
+        .launched_processes()
+        .into_iter()
+        .find(|p| p.pid() == pid_a)
+        .expect("process a must exist");
+    assert!(proc_a.is_alive());
+
+    // 2. Activate profile B on the same target monitor
+    let res_b = coordinator.activate_profile(&p_b_id).expect("activate p_b");
+    let pid_b = match res_b {
+        ActivationResult::Launched { pid, .. } => pid,
+        _ => panic!("expected Launched for p_b"),
+    };
+    assert_ne!(pid_a, pid_b, "Profile B must have a new process instance");
+
+    // Profile A must be stopped before B was launched
+    assert!(
+        !proc_a.is_alive(),
+        "Profile A must be stopped when Profile B takes over the monitor"
+    );
+    assert!(proc_a.close_requested());
+    assert_eq!(
+        coordinator.get_lifecycle_state(&p_a_id).unwrap(),
+        ProfileLifecycleState::Idle,
+        "Profile A must transition to Idle"
+    );
+
+    // Profile B must be Running
+    assert_eq!(
+        coordinator.get_lifecycle_state(&p_b_id).unwrap(),
+        ProfileLifecycleState::Running {
+            pid: pid_b,
+            target_monitor: queue_mon.clone(),
+        }
+    );
+
+    let proc_b = launcher
+        .launched_processes()
+        .into_iter()
+        .find(|p| p.pid() == pid_b)
+        .expect("process b must exist");
+    assert!(proc_b.is_alive());
+
+    // Verify only one profile is running in active_instances
+    assert!(!coordinator.is_profile_running(&p_a_id));
+    assert!(coordinator.is_profile_running(&p_b_id));
+}
+
+#[test]
+fn test_activate_profile_replaces_slow_profile_with_3s_deadline_force_stop_before_launching_replacement(
+) {
+    let store = Arc::new(MemoryProfileStore::new());
+    let queue_mon = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE-1"),
+        name: "Queue Display 1".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![
+        MonitorDescriptor {
+            identity: MonitorIdentity::new("MON-PRIMARY"),
+            name: "Workstation Main Display".to_string(),
+            is_primary: true,
+        },
+        queue_mon.clone(),
+    ]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_switch_slow");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock.clone(),
+        base_dir,
+    );
+
+    let p_a_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Poli Gigi",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local/gigi",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-1"))),
+        )
+        .expect("save p_a");
+
+    let p_b_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Poli Anak",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local/anak",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-1"))),
+        )
+        .expect("save p_b");
+
+    // 1. Activate profile A
+    let res_a = coordinator.activate_profile(&p_a_id).expect("activate p_a");
+    let pid_a = match res_a {
+        ActivationResult::Launched { pid, .. } => pid,
+        _ => panic!("expected Launched for p_a"),
+    };
+
+    let proc_a = launcher
+        .launched_processes()
+        .into_iter()
+        .find(|p| p.pid() == pid_a)
+        .expect("process a must exist");
+    assert!(proc_a.is_alive());
+
+    // Make Profile A unresponsive to graceful close (e.g. modal prompt or freeze)
+    proc_a.set_refuse_graceful(true);
+
+    // 2. Activate profile B on the same target monitor
+    let t0 = clock.now();
+    let res_b = coordinator.activate_profile(&p_b_id).expect("activate p_b");
+    let t1 = clock.now();
+
+    let pid_b = match res_b {
+        ActivationResult::Launched { pid, .. } => pid,
+        _ => panic!("expected Launched for p_b"),
+    };
+    assert_ne!(pid_a, pid_b);
+
+    // Verification:
+    // 3-second deadline must have elapsed before forcing termination
+    assert!(
+        t1.duration_since(t0) >= std::time::Duration::from_secs(3),
+        "Switching must wait 3 seconds before force stopping the previous unresponsive profile"
+    );
+
+    // Profile A must have been gracefully requested and then force stopped
+    assert!(proc_a.close_requested());
+    assert!(proc_a.force_stopped());
+    assert!(!proc_a.is_alive(), "Profile A must be dead");
+    assert_eq!(
+        coordinator.get_lifecycle_state(&p_a_id).unwrap(),
+        ProfileLifecycleState::Idle
+    );
+
+    // Profile B must be running
+    assert_eq!(
+        coordinator.get_lifecycle_state(&p_b_id).unwrap(),
+        ProfileLifecycleState::Running {
+            pid: pid_b,
+            target_monitor: queue_mon,
+        }
+    );
+    assert!(!coordinator.is_profile_running(&p_a_id));
+    assert!(coordinator.is_profile_running(&p_b_id));
+}
+
+#[test]
+fn test_activate_profile_on_one_monitor_does_not_affect_profile_on_another_monitor_or_nurse_browser(
+) {
+    let store = Arc::new(MemoryProfileStore::new());
+    let mon1 = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE-1"),
+        name: "Queue Display 1".to_string(),
+        is_primary: false,
+    };
+    let mon2 = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE-2"),
+        name: "Queue Display 2".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![
+        MonitorDescriptor {
+            identity: MonitorIdentity::new("MON-PRIMARY"),
+            name: "Workstation Main Display".to_string(),
+            is_primary: true,
+        },
+        mon1.clone(),
+        mon2.clone(),
+    ]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_multi_mon");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+
+    // 0. Simulate Nurse working browser running on primary display
+    let nurse_plan = window_hop::browsers::LaunchPlan {
+        executable: PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+        arguments: vec!["https://hospital.simrs/nurse-dashboard".to_string()],
+        user_data_dir: PathBuf::from(r"C:\Users\Nurse\AppData\Local\Microsoft\Edge\User Data"),
+        login_retention: window_hop::browsers::LoginRetentionNote::SessionIsolated {
+            explanation: "Nurse default session".to_string(),
+        },
+    };
+    let nurse_proc = launcher
+        .launch(
+            &nurse_plan,
+            &MonitorDescriptor {
+                identity: MonitorIdentity::new("MON-PRIMARY"),
+                name: "Workstation Main Display".to_string(),
+                is_primary: true,
+            },
+        )
+        .expect("nurse browser running");
+    let nurse_pid = nurse_proc.pid();
+
+    // 1. Profile A on Monitor 1
+    let p_a_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Poli Gigi",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local/gigi",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-1"))),
+        )
+        .expect("save p_a");
+
+    // 2. Profile C on Monitor 2
+    let p_c_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Farmasi",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local/farmasi",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-2"))),
+        )
+        .expect("save p_c");
+
+    // 3. Profile B on Monitor 1 (replacement for A)
+    let p_b_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Poli Anak",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local/anak",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-1"))),
+        )
+        .expect("save p_b");
+
+    // Activate Profile A (Monitor 1) and Profile C (Monitor 2)
+    coordinator.activate_profile(&p_a_id).expect("activate p_a");
+    coordinator.activate_profile(&p_c_id).expect("activate p_c");
+
+    assert!(coordinator.is_profile_running(&p_a_id));
+    assert!(coordinator.is_profile_running(&p_c_id));
+
+    let proc_c = launcher
+        .launched_processes()
+        .into_iter()
+        .find(|p| {
+            if let Some(pid) = coordinator.active_instance(&p_c_id).map(|i| i.pid()) {
+                p.pid() == pid
+            } else {
+                false
+            }
+        })
+        .expect("process c must exist");
+    assert!(proc_c.is_alive());
+
+    // 4. Activate Profile B on Monitor 1
+    coordinator.activate_profile(&p_b_id).expect("activate p_b");
+
+    // Verification:
+    // Profile A on Monitor 1 is stopped
+    assert!(!coordinator.is_profile_running(&p_a_id));
+    // Profile B on Monitor 1 is running
+    assert!(coordinator.is_profile_running(&p_b_id));
+
+    // Profile C on Monitor 2 is STILL RUNNING and was NOT stopped or disturbed!
+    assert!(
+        coordinator.is_profile_running(&p_c_id),
+        "Profile C on Monitor 2 must remain running"
+    );
+    assert!(
+        proc_c.is_alive(),
+        "Process C on Monitor 2 must still be alive"
+    );
+    assert!(
+        !proc_c.close_requested(),
+        "Process C on Monitor 2 must not have received close request"
+    );
+    assert!(
+        !proc_c.force_stopped(),
+        "Process C on Monitor 2 must not have been force stopped"
+    );
+
+    // Nurse browser on Primary is STILL RUNNING and untouched!
+    let current_nurse_proc = launcher
+        .launched_processes()
+        .into_iter()
+        .find(|p| p.pid() == nurse_pid)
+        .expect("nurse proc exists");
+    assert!(
+        current_nurse_proc.is_alive(),
+        "Nurse working browser must remain alive"
+    );
+    assert!(
+        !current_nurse_proc.close_requested(),
+        "Nurse working browser must never receive close request"
+    );
+    assert!(
+        !current_nurse_proc.force_stopped(),
+        "Nurse working browser must never be force stopped"
+    );
+}
+
+#[test]
+fn test_activate_profile_switch_fails_if_previous_profile_fails_to_stop_without_killing_by_name() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let queue_mon = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE-1"),
+        name: "Queue Display 1".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![
+        MonitorDescriptor {
+            identity: MonitorIdentity::new("MON-PRIMARY"),
+            name: "Workstation Main Display".to_string(),
+            is_primary: true,
+        },
+        queue_mon.clone(),
+    ]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_switch_fail");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+
+    let p_a_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Poli Gigi",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local/gigi",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-1"))),
+        )
+        .expect("save p_a");
+
+    let p_b_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Poli Anak",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local/anak",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-1"))),
+        )
+        .expect("save p_b");
+
+    // 1. Activate Profile A
+    let res_a = coordinator.activate_profile(&p_a_id).expect("activate p_a");
+    let pid_a = match res_a {
+        ActivationResult::Launched { pid, .. } => pid,
+        _ => panic!("expected Launched for p_a"),
+    };
+
+    let proc_a = launcher
+        .launched_processes()
+        .into_iter()
+        .find(|p| p.pid() == pid_a)
+        .expect("proc a exists");
+    assert!(proc_a.is_alive());
+
+    // 2. Configure Profile A to refuse graceful close AND fail force stop (e.g. permission/handle failure)
+    proc_a.set_refuse_graceful(true);
+    proc_a.set_fail_force_stop(true);
+
+    // 3. Attempt to activate Profile B on the same monitor
+    let res_b = coordinator.activate_profile(&p_b_id);
+    assert!(
+        res_b.is_err(),
+        "Activating Profile B must fail when Profile A cannot be stopped"
+    );
+    match res_b.unwrap_err() {
+        ApplicationError::SwitchProfileFailed {
+            previous_profile_id,
+            previous_profile_name,
+            target_monitor,
+            reason,
+        } => {
+            assert_eq!(previous_profile_id, p_a_id);
+            assert_eq!(previous_profile_name, "Antrian Poli Gigi");
+            assert_eq!(target_monitor, MonitorIdentity::new("MON-QUEUE-1"));
+            assert!(!reason.is_empty());
+        }
+        err => panic!("Expected SwitchProfileFailed, got {:?}", err),
+    }
+
+    // Profile B must NOT have been launched
+    assert_eq!(
+        launcher.launched_processes().len(),
+        1,
+        "No new process for Profile B may be launched"
+    );
+    assert!(
+        !coordinator.is_profile_running(&p_b_id),
+        "Profile B must not be running"
+    );
+    assert_eq!(
+        coordinator.get_lifecycle_state(&p_b_id).unwrap(),
+        ProfileLifecycleState::Idle
+    );
+
+    // Profile A must still be tracked as running (not dropped or left in unknown state)
+    assert!(proc_a.is_alive());
+    assert!(coordinator.is_profile_running(&p_a_id));
+    assert_eq!(
+        coordinator.get_lifecycle_state(&p_a_id).unwrap(),
+        ProfileLifecycleState::Running {
+            pid: pid_a,
+            target_monitor: queue_mon,
+        }
+    );
+}
+
+#[test]
+fn test_repeated_and_alternating_activation_between_two_profiles_on_same_monitor() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let queue_mon = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE-1"),
+        name: "Queue Display 1".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![
+        MonitorDescriptor {
+            identity: MonitorIdentity::new("MON-PRIMARY"),
+            name: "Workstation Main Display".to_string(),
+            is_primary: true,
+        },
+        queue_mon.clone(),
+    ]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_alternating");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+
+    let p_a_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Poli Gigi",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local/gigi",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-1"))),
+        )
+        .expect("save p_a");
+
+    let p_b_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Poli Anak",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local/anak",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-1"))),
+        )
+        .expect("save p_b");
+
+    // 1. Activate Profile A
+    let res_a1 = coordinator.activate_profile(&p_a_id).expect("activate p_a");
+    let pid_a1 = match res_a1 {
+        ActivationResult::Launched { pid, .. } => pid,
+        _ => panic!("expected Launched for p_a1"),
+    };
+    assert!(coordinator.is_profile_running(&p_a_id));
+    assert!(!coordinator.is_profile_running(&p_b_id));
+    assert_eq!(launcher.launched_processes().len(), 1);
+
+    // 2. Repeated activation of Profile A (clicks shortcut again)
+    let res_a2 = coordinator
+        .activate_profile(&p_a_id)
+        .expect("activate p_a again");
+    match res_a2 {
+        ActivationResult::Reused { pid, .. } => {
+            assert_eq!(
+                pid, pid_a1,
+                "Must reuse same PID without launching new instance"
+            );
+        }
+        _ => panic!("expected Reused for repeated p_a"),
+    }
+    assert_eq!(
+        launcher.launched_processes().len(),
+        1,
+        "No second instance for Profile A"
+    );
+    assert!(coordinator.is_profile_running(&p_a_id));
+
+    // 3. Switch to Profile B on the same monitor
+    let res_b1 = coordinator.activate_profile(&p_b_id).expect("activate p_b");
+    let pid_b1 = match res_b1 {
+        ActivationResult::Launched { pid, .. } => pid,
+        _ => panic!("expected Launched for p_b1"),
+    };
+    assert_ne!(pid_a1, pid_b1);
+    assert!(!coordinator.is_profile_running(&p_a_id));
+    assert!(coordinator.is_profile_running(&p_b_id));
+    assert_eq!(launcher.launched_processes().len(), 2);
+
+    // 4. Repeated activation of Profile B (clicks shortcut again)
+    let res_b2 = coordinator
+        .activate_profile(&p_b_id)
+        .expect("activate p_b again");
+    match res_b2 {
+        ActivationResult::Reused { pid, .. } => {
+            assert_eq!(
+                pid, pid_b1,
+                "Must reuse same PID for Profile B without duplicate"
+            );
+        }
+        _ => panic!("expected Reused for repeated p_b"),
+    }
+    assert_eq!(
+        launcher.launched_processes().len(),
+        2,
+        "No duplicate instance for Profile B"
+    );
+    assert!(coordinator.is_profile_running(&p_b_id));
+
+    // 5. Switch back to Profile A on the same monitor
+    let res_a3 = coordinator
+        .activate_profile(&p_a_id)
+        .expect("switch back to p_a");
+    let pid_a3 = match res_a3 {
+        ActivationResult::Launched { pid, .. } => pid,
+        _ => panic!("expected Launched for p_a3"),
+    };
+    assert_ne!(pid_a3, pid_b1);
+    assert!(coordinator.is_profile_running(&p_a_id));
+    assert!(!coordinator.is_profile_running(&p_b_id));
+    assert_eq!(launcher.launched_processes().len(), 3);
+}
+
+#[test]
+fn test_profile_switching_failure_preserves_other_monitors_and_records_clear_error_for_ui() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let mon1 = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE-1"),
+        name: "Queue Display 1".to_string(),
+        is_primary: false,
+    };
+    let mon2 = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE-2"),
+        name: "Queue Display 2".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![
+        MonitorDescriptor {
+            identity: MonitorIdentity::new("MON-PRIMARY"),
+            name: "Workstation Main Display".to_string(),
+            is_primary: true,
+        },
+        mon1.clone(),
+        mon2.clone(),
+    ]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_ui_err");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+
+    // Profile A (Monitor 1)
+    let p_a_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Poli Gigi",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local/gigi",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-1"))),
+        )
+        .expect("save p_a");
+
+    // Profile C (Monitor 2)
+    let p_c_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Farmasi",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local/farmasi",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-2"))),
+        )
+        .expect("save p_c");
+
+    // Profile B (Replacement on Monitor 1)
+    let p_b_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Poli Anak",
+                PathBuf::from("msedge.exe"),
+                "--kiosk https://antrian.local/anak",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-1"))),
+        )
+        .expect("save p_b");
+
+    // Activate A on Mon 1 and C on Mon 2
+    let act_a = coordinator.activate_profile(&p_a_id).expect("activate p_a");
+    let pid_a = match act_a {
+        ActivationResult::Launched { pid, .. } => pid,
+        _ => panic!("expected Launched for p_a"),
+    };
+    let act_c = coordinator.activate_profile(&p_c_id).expect("activate p_c");
+    let pid_c = match act_c {
+        ActivationResult::Launched { pid, .. } => pid,
+        _ => panic!("expected Launched for p_c"),
+    };
+
+    assert_eq!(
+        coordinator.get_lifecycle_state(&p_a_id).unwrap(),
+        ProfileLifecycleState::Running {
+            pid: pid_a,
+            target_monitor: mon1.clone(),
+        }
+    );
+    assert_eq!(
+        coordinator.get_lifecycle_state(&p_c_id).unwrap(),
+        ProfileLifecycleState::Running {
+            pid: pid_c,
+            target_monitor: mon2.clone(),
+        }
+    );
+
+    // Simulate Profile A refusing graceful close and failing force stop
+    let proc_a = launcher
+        .launched_processes()
+        .into_iter()
+        .find(|p| p.pid() == pid_a)
+        .expect("proc a exists");
+    proc_a.set_refuse_graceful(true);
+    proc_a.set_fail_force_stop(true);
+
+    // Now attempt to switch: Activate Profile B on Monitor 1
+    let switch_res = coordinator.activate_profile(&p_b_id);
+    assert!(switch_res.is_err());
+
+    // 1. Clear error message recorded for UI display
+    let last_err = coordinator
+        .last_error()
+        .expect("Coordinator must record last_error for UI display");
+    assert!(
+        last_err.contains("Gagal mengganti profil aktif pada monitor 'MON-QUEUE-1'"),
+        "Error message must specify monitor identity: {}",
+        last_err
+    );
+    assert!(
+        last_err.contains("Antrian Poli Gigi"),
+        "Error message must specify previous profile name: {}",
+        last_err
+    );
+
+    // 2. Profile C on Monitor 2 is completely unaffected and still Running
+    assert!(
+        coordinator.is_profile_running(&p_c_id),
+        "Profile C on Monitor 2 must remain running"
+    );
+    assert_eq!(
+        coordinator.get_lifecycle_state(&p_c_id).unwrap(),
+        ProfileLifecycleState::Running {
+            pid: pid_c,
+            target_monitor: mon2,
+        }
+    );
+
+    // 3. Profile A on Monitor 1 remains Running (since it could not be stopped)
+    assert!(
+        coordinator.is_profile_running(&p_a_id),
+        "Profile A must still be running"
+    );
+    assert_eq!(
+        coordinator.get_lifecycle_state(&p_a_id).unwrap(),
+        ProfileLifecycleState::Running {
+            pid: pid_a,
+            target_monitor: mon1,
+        }
+    );
+
+    // 4. Profile B remains Idle
+    assert!(
+        !coordinator.is_profile_running(&p_b_id),
+        "Profile B must not be running"
+    );
+    assert_eq!(
+        coordinator.get_lifecycle_state(&p_b_id).unwrap(),
+        ProfileLifecycleState::Idle
+    );
+}

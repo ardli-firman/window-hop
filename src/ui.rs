@@ -1,6 +1,7 @@
 //! GPUI presentation for Window Hop profile management.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
@@ -8,15 +9,15 @@ use gpui_kit::component::{h_flex, v_flex, ActiveTheme};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::application::LifecycleCoordinator;
+use crate::application::{ActivationResult, LifecycleCoordinator, StopOutcome};
 use crate::domain::{
-    DraftProfileInput, MonitorDescriptor, MonitorIdentity, ProfileId, ProfileStatus,
-    TargetMonitorStatus,
+    DraftProfileInput, ExitReason, MonitorDescriptor, MonitorIdentity, ProfileId,
+    ProfileLifecycleState, ProfileStatus, TargetMonitorStatus,
 };
 
 /// Tampilan utama pengaturan profil Window Hop.
 pub struct WindowHopView {
-    coordinator: LifecycleCoordinator,
+    coordinator: Arc<Mutex<LifecycleCoordinator>>,
     selected_profile_id: Option<ProfileId>,
     selected_target_monitor: Option<MonitorIdentity>,
     cached_monitors: Vec<MonitorDescriptor>,
@@ -56,7 +57,7 @@ impl WindowHopView {
         };
 
         Self {
-            coordinator,
+            coordinator: Arc::new(Mutex::new(coordinator)),
             selected_profile_id: None,
             selected_target_monitor: None,
             cached_monitors,
@@ -72,7 +73,7 @@ impl WindowHopView {
 
     /// Memperbarui cache daftar monitor yang terdeteksi secara manual atau saat ada perubahan.
     pub fn refresh_monitors(&mut self, cx: &mut Context<Self>) {
-        match self.coordinator.available_monitors() {
+        match self.coordinator.lock().unwrap().available_monitors() {
             Ok(monitors) => {
                 self.cached_monitors = monitors;
                 self.monitors_error = None;
@@ -99,13 +100,14 @@ impl WindowHopView {
         self.is_error = false;
 
         // Segarkan cache monitor saat memilih profil agar informasi layar selalu mutakhir
-        if let Ok(monitors) = self.coordinator.available_monitors() {
+        if let Ok(monitors) = self.coordinator.lock().unwrap().available_monitors() {
             self.cached_monitors = monitors;
             self.monitors_error = None;
         }
 
         if let Some(ref pid) = id {
-            if let Some(profile) = self.coordinator.get_profile(pid).cloned() {
+            let profile_opt = self.coordinator.lock().unwrap().get_profile(pid).cloned();
+            if let Some(profile) = profile_opt {
                 let name = profile.name().to_string();
                 let path = profile.browser_path().to_string_lossy().to_string();
                 let params = profile.custom_parameters().to_string();
@@ -184,6 +186,8 @@ impl WindowHopView {
 
         let prepare_result = self
             .coordinator
+            .lock()
+            .unwrap()
             .prepare_draft_save(self.selected_profile_id.as_ref(), &input);
 
         let (candidate_config, target_id) = match prepare_result {
@@ -196,11 +200,12 @@ impl WindowHopView {
             }
         };
 
-        let store = self.coordinator.store().clone();
+        let store = self.coordinator.lock().unwrap().store().clone();
         self.status_message = Some("Menyimpan profil...".to_string());
         self.is_error = false;
         cx.notify();
 
+        let coordinator = self.coordinator.clone();
         cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let cx = cx.clone();
             async move {
@@ -215,7 +220,10 @@ impl WindowHopView {
                     let _ = this.update(cx, |view, cx| {
                         match save_result {
                             Ok(()) => {
-                                view.coordinator.commit_saved_config(candidate_config);
+                                coordinator
+                                    .lock()
+                                    .unwrap()
+                                    .commit_saved_config(candidate_config);
                                 view.selected_profile_id = Some(target_id);
                                 view.status_message =
                                     Some("Profil berhasil disimpan secara atomik.".to_string());
@@ -234,12 +242,128 @@ impl WindowHopView {
         })
         .detach();
     }
+
+    /// Mengaktifkan profil yang sedang dipilih melalui LifecycleCoordinator.
+    /// Operasi penutupan dan peluncuran dijalankan di background executor
+    /// agar tidak memblokir event loop GPUI selama deadline 3 detik.
+    pub fn activate_selected_profile(&mut self, cx: &mut Context<Self>) {
+        let Some(ref pid) = self.selected_profile_id else {
+            return;
+        };
+
+        let pid = pid.clone();
+        let coordinator = self.coordinator.clone();
+        self.status_message = Some("Mengaktifkan profil...".to_string());
+        self.is_error = false;
+        cx.notify();
+
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { coordinator.lock().unwrap().activate_profile(&pid) })
+                    .await;
+
+                cx.update(|cx| {
+                    let _ = this.update(cx, |view, cx| {
+                        match result {
+                            Ok(ActivationResult::Launched { target_monitor, .. }) => {
+                                view.status_message = Some(format!(
+                                    "Profil berhasil diaktifkan pada monitor '{}'.",
+                                    target_monitor.name
+                                ));
+                                view.is_error = false;
+                            }
+                            Ok(ActivationResult::Reused { target_monitor, .. }) => {
+                                view.status_message = Some(format!(
+                                    "Profil sudah aktif; jendela diposisikan kembali pada monitor '{}'.",
+                                    target_monitor.name
+                                ));
+                                view.is_error = false;
+                            }
+                            Ok(ActivationResult::WaitingForMonitor { target_monitor }) => {
+                                view.status_message = Some(format!(
+                                    "Monitor tujuan '{}' belum tersedia. Profil menunggu monitor tersambung.",
+                                    target_monitor
+                                ));
+                                view.is_error = false;
+                            }
+                            Err(err) => {
+                                view.status_message =
+                                    Some(format!("Gagal mengaktifkan profil: {}", err));
+                                view.is_error = true;
+                            }
+                        }
+                        cx.notify();
+                    });
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Menghentikan profil yang sedang dipilih melalui LifecycleCoordinator.
+    /// Dijalankan di background executor untuk menjaga kelancaran antarmuka pengguna.
+    pub fn stop_selected_profile(&mut self, cx: &mut Context<Self>) {
+        let Some(ref pid) = self.selected_profile_id else {
+            return;
+        };
+
+        let pid = pid.clone();
+        let coordinator = self.coordinator.clone();
+        self.status_message = Some("Menghentikan profil...".to_string());
+        self.is_error = false;
+        cx.notify();
+
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { coordinator.lock().unwrap().stop_profile(&pid) })
+                    .await;
+
+                cx.update(|cx| {
+                    let _ = this.update(cx, |view, cx| {
+                        match result {
+                            Ok(StopOutcome::Graceful { .. }) => {
+                                view.status_message =
+                                    Some("Profil berhasil dihentikan secara normal.".to_string());
+                                view.is_error = false;
+                            }
+                            Ok(StopOutcome::Forced { .. }) => {
+                                view.status_message = Some(
+                                    "Profil dihentikan secara paksa setelah batas tenggat 3 detik."
+                                        .to_string(),
+                                );
+                                view.is_error = false;
+                            }
+                            Ok(StopOutcome::NotRunning) => {
+                                view.status_message =
+                                    Some("Profil tidak sedang berjalan.".to_string());
+                                view.is_error = false;
+                            }
+                            Err(err) => {
+                                view.status_message =
+                                    Some(format!("Gagal menghentikan profil: {}", err));
+                                view.is_error = true;
+                            }
+                        }
+                        cx.notify();
+                    });
+                });
+            }
+        })
+        .detach();
+    }
 }
 
 impl Render for WindowHopView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let profiles = self.coordinator.list_profiles();
+        let coord = self.coordinator.lock().unwrap();
+        let profiles = coord.list_profiles();
         let selected_id = self.selected_profile_id.clone();
         let available_monitors = &self.cached_monitors;
 
@@ -358,6 +482,10 @@ impl Render for WindowHopView {
                                             let is_selected = selected_id.as_ref() == Some(p.id());
                                             let pid = p.id().clone();
                                             let p_status = p.evaluate_status(available_monitors);
+                                            let p_lifecycle = coord
+                                                .get_lifecycle_state(&pid)
+                                                .unwrap_or(ProfileLifecycleState::Idle);
+
                                             let bg = if is_selected {
                                                 theme.accent.opacity(0.3)
                                             } else {
@@ -371,11 +499,36 @@ impl Render for WindowHopView {
                                             let item_id =
                                                 SharedString::from(format!("profile-item-{}", pid));
 
-                                            let (status_text, status_color) = match p_status {
-                                                ProfileStatus::DraftNotReady => ("Draft", theme.muted_foreground),
-                                                ProfileStatus::Ready => ("Siap", theme.primary),
-                                                ProfileStatus::TargetUnavailable => ("Tidak Tersedia", theme.warning),
-                                                ProfileStatus::TargetAmbiguous => ("Ambigu", theme.danger),
+                                            let (status_text, status_color) = match &p_lifecycle {
+                                                ProfileLifecycleState::Running { .. } => {
+                                                    ("● Aktif", theme.primary)
+                                                }
+                                                ProfileLifecycleState::WaitingForMonitor {
+                                                    ..
+                                                } => ("Menunggu", theme.warning),
+                                                ProfileLifecycleState::Disconnected { .. } => {
+                                                    ("Terputus", theme.warning)
+                                                }
+                                                ProfileLifecycleState::Exited { reason } => {
+                                                    match reason {
+                                                        ExitReason::Crash => ("Crash", theme.danger),
+                                                        ExitReason::ManualClose => {
+                                                            ("Berhenti", theme.muted_foreground)
+                                                        }
+                                                    }
+                                                }
+                                                ProfileLifecycleState::Idle => match p_status {
+                                                    ProfileStatus::DraftNotReady => {
+                                                        ("Draft", theme.muted_foreground)
+                                                    }
+                                                    ProfileStatus::Ready => ("Siap", theme.primary),
+                                                    ProfileStatus::TargetUnavailable => {
+                                                        ("Tidak Tersedia", theme.warning)
+                                                    }
+                                                    ProfileStatus::TargetAmbiguous => {
+                                                        ("Ambigu", theme.danger)
+                                                    }
+                                                },
                                             };
 
                                             div()
@@ -693,18 +846,86 @@ impl Render for WindowHopView {
                                     .text_color(status_color)
                                     .child(status_text)
                             })
+                            // Keterangan Status Pergantian / Runtime
+                            .when_some(self.selected_profile_id.as_ref(), |this, pid| {
+                                let is_active = coord.is_profile_running(pid);
+                                if is_active {
+                                    this.child(
+                                        div()
+                                            .p_3()
+                                            .rounded_md()
+                                            .bg(theme.primary.opacity(0.12))
+                                            .border_1()
+                                            .border_color(theme.primary)
+                                            .text_xs()
+                                            .text_color(theme.primary)
+                                            .child("● Profil ini sedang aktif berjalan pada monitor tujuan."),
+                                    )
+                                } else {
+                                    // Periksa apakah ada profil lain yang sedang aktif di monitor tujuan yang sama
+                                    let conflicting_profile = if let Some(ref target_id) = self.selected_target_monitor {
+                                        coord.find_conflicting_active_profile(Some(pid), target_id)
+                                    } else {
+                                        None
+                                    };
+
+                                    if let Some(other) = conflicting_profile {
+                                        this.child(
+                                            div()
+                                                .p_3()
+                                                .rounded_md()
+                                                .bg(theme.warning.opacity(0.12))
+                                                .border_1()
+                                                .border_color(theme.warning)
+                                                .text_xs()
+                                                .text_color(theme.warning)
+                                                .child(format!(
+                                                    "ℹ Monitor tujuan saat ini sedang aktif digunakan oleh profil '{}'. Mengaktifkan profil ini akan menutup profil tersebut terlebih dahulu.",
+                                                    other.name()
+                                                )),
+                                        )
+                                    } else {
+                                        this
+                                    }
+                                }
+                            })
                             // Tombol Aksi
-                            .child(
+                            .child({
+                                let is_running = self
+                                    .selected_profile_id
+                                    .as_ref()
+                                    .map(|id| coord.is_profile_running(id))
+                                    .unwrap_or(false);
+
                                 h_flex()
                                     .gap_3()
                                     .child(
                                         Button::new("btn-save-profile")
-                                            .primary()
                                             .label("Simpan Profil")
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 this.save_profile(window, cx);
                                             })),
                                     )
+                                    .when(self.selected_profile_id.is_some() && !is_running, |this| {
+                                        this.child(
+                                            Button::new("btn-activate-profile")
+                                                .primary()
+                                                .label("Aktifkan Profil")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.activate_selected_profile(cx);
+                                                })),
+                                        )
+                                    })
+                                    .when(self.selected_profile_id.is_some() && is_running, |this| {
+                                        this.child(
+                                            Button::new("btn-stop-profile")
+                                                .danger()
+                                                .label("Hentikan Profil")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.stop_selected_profile(cx);
+                                                })),
+                                        )
+                                    })
                                     .child(
                                         Button::new("btn-reset-form")
                                             .label("Reset")
@@ -712,8 +933,8 @@ impl Render for WindowHopView {
                                                 let id = this.selected_profile_id.clone();
                                                 this.select_profile(id, window, cx);
                                             })),
-                                    ),
-                            ),
+                                    )
+                            }),
                     ),
             )
     }

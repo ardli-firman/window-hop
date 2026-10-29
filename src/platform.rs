@@ -175,6 +175,7 @@ pub struct MockManagedProcess {
     force_stopped: AtomicBool,
     reposition_count: AtomicUsize,
     refuse_graceful: AtomicBool,
+    fail_force_stop: AtomicBool,
     exit_reason: Mutex<Option<crate::domain::ExitReason>>,
 }
 
@@ -189,6 +190,7 @@ impl MockManagedProcess {
             force_stopped: AtomicBool::new(false),
             reposition_count: AtomicUsize::new(0),
             refuse_graceful: AtomicBool::new(false),
+            fail_force_stop: AtomicBool::new(false),
             exit_reason: Mutex::new(None),
         }
     }
@@ -196,6 +198,11 @@ impl MockManagedProcess {
     /// Mengatur apakah proses menolak penutupan anggun (misal jendela konfirmasi dialog yang macet).
     pub fn set_refuse_graceful(&self, refuse: bool) {
         self.refuse_graceful.store(refuse, Ordering::SeqCst);
+    }
+
+    /// Mengatur apakah proses gagal dihentikan secara paksa (misal kendala hak akses OS).
+    pub fn set_fail_force_stop(&self, fail: bool) {
+        self.fail_force_stop.store(fail, Ordering::SeqCst);
     }
 
     /// Mengambil rencana peluncuran proses ini.
@@ -260,6 +267,11 @@ impl ManagedProcess for MockManagedProcess {
 
     fn force_stop(&self) -> Result<(), PlatformError> {
         self.force_stopped.store(true, Ordering::SeqCst);
+        if self.fail_force_stop.load(Ordering::SeqCst) {
+            return Err(PlatformError::Os(
+                "Akses ditolak saat mencoba menghentikan proses".to_string(),
+            ));
+        }
         self.is_alive.store(false, Ordering::SeqCst);
         Ok(())
     }
