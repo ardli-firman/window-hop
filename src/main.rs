@@ -30,10 +30,6 @@ fn main() {
     let mut coordinator = LifecycleCoordinator::from_store(store);
     let _ = coordinator.load();
 
-    if let Some(ref profile_id) = activate_profile_id {
-        let _ = coordinator.handle_shortcut_activation(profile_id);
-    }
-
     let coordinator_arc = Arc::new(Mutex::new(coordinator));
     let coord_for_ipc = coordinator_arc.clone();
     let _ = ipc.start_listener(Box::new(move |command| {
@@ -42,6 +38,12 @@ fn main() {
             let _ = coord.handle_shortcut_activation(&pid);
         }
     }));
+
+    if let Some(ref profile_id) = activate_profile_id {
+        if let Ok(mut coord) = coordinator_arc.lock() {
+            let _ = coord.handle_shortcut_activation(profile_id);
+        }
+    }
 
     if activate_profile_id.is_some() {
         // Dimulai dari shortcut profil: jangan buka pengaturan, tetap jalankan koordinator di latar belakang

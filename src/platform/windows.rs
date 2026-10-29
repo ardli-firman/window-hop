@@ -381,15 +381,15 @@ impl Default for WindowsShortcutCreator {
 
 impl crate::platform::ShortcutCreator for WindowsShortcutCreator {
     fn default_desktop_dir(&self) -> Result<std::path::PathBuf, PlatformError> {
-        if let Some(userprofile) = std::env::var_os("USERPROFILE") {
-            let desktop = std::path::PathBuf::from(userprofile).join("Desktop");
-            return Ok(desktop);
-        }
         if let Some(onedrive) = std::env::var_os("OneDrive") {
             let desktop = std::path::PathBuf::from(onedrive).join("Desktop");
             if desktop.exists() {
                 return Ok(desktop);
             }
+        }
+        if let Some(userprofile) = std::env::var_os("USERPROFILE") {
+            let desktop = std::path::PathBuf::from(userprofile).join("Desktop");
+            return Ok(desktop);
         }
         Err(PlatformError::Os(
             "Tidak dapat menemukan direktori Desktop pengguna Windows".to_string(),
@@ -412,9 +412,9 @@ impl crate::platform::ShortcutCreator for WindowsShortcutCreator {
             _ => std::env::current_dir().unwrap_or_else(|_| spec.target_dir.clone()),
         };
 
-        // Menggunakan parameter posisi PowerShell ($args[0]..$args[3]) yang dipass via Command args
-        // agar parameter tidak diinterpolasi ke string script shell dan bebas dari issue kutip/spasi.
-        let ps_script = "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut($args[0]); $s.TargetPath = $args[1]; $s.Arguments = $args[2]; $s.WorkingDirectory = $args[3]; $s.Save()";
+        // Menggunakan script block berparameter (& { param($lnk, $target, $arg, $dir) ... })
+        // agar parameter posisi terikat dengan benar dan bebas dari masalah shell injection atau kutip/spasi.
+        let ps_script = "& { param($lnk, $target, $arg, $dir) $ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut($lnk); $s.TargetPath = $target; $s.Arguments = $arg; $s.WorkingDirectory = $dir; $s.Save() }";
 
         let output = std::process::Command::new("powershell.exe")
             .arg("-NoProfile")

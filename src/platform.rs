@@ -611,7 +611,7 @@ impl SingleInstanceCoordinator for LocalSingleInstanceCoordinator {
         let mut response = String::new();
         match reader.read_line(&mut response) {
             Ok(_) if response.trim() == "OK" => Ok(true),
-            _ => Ok(true),
+            _ => Ok(false),
         }
     }
 
