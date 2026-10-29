@@ -1,7 +1,11 @@
 //! Application coordination, lifecycle management, and profile operations.
 
-use crate::domain::{AppConfig, DraftProfileInput, Profile, ProfileId, ProfileStatus};
+use crate::domain::{
+    AppConfig, DraftProfileInput, MonitorDescriptor, MonitorIdentity, Profile, ProfileId,
+    ProfileStatus, TargetMonitorStatus,
+};
 use crate::persistence::{PersistenceError, ProfileStore};
+use crate::platform::{default_monitor_provider, MonitorProvider, PlatformError};
 use std::sync::Arc;
 
 /// Kesalahan pada lapisan koordinasi aplikasi.
@@ -10,11 +14,27 @@ pub enum ApplicationError {
     #[error("Kesalahan penyimpanan: {0}")]
     Persistence(#[from] PersistenceError),
 
+    #[error("Kesalahan platform display: {0}")]
+    Platform(#[from] PlatformError),
+
     #[error("Validasi input gagal: {0}")]
     ValidationError(String),
 
     #[error("Profil {id} masih berupa draft dan belum memiliki monitor tujuan sehingga belum siap diaktifkan")]
     DraftNotReady { id: ProfileId },
+
+    #[error("Monitor tujuan '{recorded_identity}' untuk profil {id} tidak tersedia")]
+    TargetMonitorUnavailable {
+        id: ProfileId,
+        recorded_identity: MonitorIdentity,
+    },
+
+    #[error("Monitor tujuan '{recorded_identity}' untuk profil {id} ambigu ({match_count} monitor cocok); perlu pemilihan ulang")]
+    TargetMonitorAmbiguous {
+        id: ProfileId,
+        recorded_identity: MonitorIdentity,
+        match_count: usize,
+    },
 
     #[error("Profil dengan ID {id} tidak ditemukan")]
     ProfileNotFound { id: ProfileId },
@@ -26,20 +46,27 @@ pub enum ApplicationError {
 /// Koordinator siklus hidup dan konfigurasi Window Hop.
 pub struct LifecycleCoordinator {
     store: Arc<dyn ProfileStore>,
+    monitor_provider: Arc<dyn MonitorProvider>,
     config: AppConfig,
     last_error: Option<String>,
     load_failed: bool,
 }
 
 impl LifecycleCoordinator {
-    /// Membuat instance baru LifecycleCoordinator dengan ProfileStore yang ditentukan.
-    pub fn new(store: Arc<dyn ProfileStore>) -> Self {
+    /// Membuat instance baru LifecycleCoordinator dengan ProfileStore dan MonitorProvider yang ditentukan.
+    pub fn new(store: Arc<dyn ProfileStore>, monitor_provider: Arc<dyn MonitorProvider>) -> Self {
         Self {
             store,
+            monitor_provider,
             config: AppConfig::default(),
             last_error: None,
             load_failed: false,
         }
+    }
+
+    /// Membuat instance baru LifecycleCoordinator dengan MonitorProvider default sistem.
+    pub fn from_store(store: Arc<dyn ProfileStore>) -> Self {
+        Self::new(store, default_monitor_provider())
     }
 
     /// Memvalidasi data input profil draft.
@@ -109,16 +136,18 @@ impl LifecycleCoordinator {
                 profile.set_name(trimmed_name);
                 profile.set_browser_path(input.browser_path);
                 profile.set_custom_parameters(input.custom_parameters);
+                profile.set_target_monitor(input.target_monitor);
                 existing_id.clone()
             }
             None => {
                 let new_id = ProfileId::generate();
-                let profile = Profile::new_draft(
+                let mut profile = Profile::new_draft(
                     new_id.clone(),
                     trimmed_name,
                     input.browser_path,
                     input.custom_parameters,
                 );
+                profile.set_target_monitor(input.target_monitor);
                 candidate_config.profiles_mut().push(profile);
                 new_id
             }
@@ -169,16 +198,18 @@ impl LifecycleCoordinator {
                 profile.set_name(trimmed_name);
                 profile.set_browser_path(input.browser_path.clone());
                 profile.set_custom_parameters(input.custom_parameters.clone());
+                profile.set_target_monitor(input.target_monitor.clone());
                 existing_id.clone()
             }
             None => {
                 let new_id = ProfileId::generate();
-                let profile = Profile::new_draft(
+                let mut profile = Profile::new_draft(
                     new_id.clone(),
                     trimmed_name,
                     input.browser_path.clone(),
                     input.custom_parameters.clone(),
                 );
+                profile.set_target_monitor(input.target_monitor.clone());
                 candidate_config.profiles_mut().push(profile);
                 new_id
             }
@@ -200,12 +231,13 @@ impl LifecycleCoordinator {
     ) -> Result<ProfileId, ApplicationError> {
         let trimmed_name = Self::validate_input(&input)?;
         let id = ProfileId::generate();
-        let profile = Profile::new_draft(
+        let mut profile = Profile::new_draft(
             id.clone(),
             trimmed_name,
             input.browser_path,
             input.custom_parameters,
         );
+        profile.set_target_monitor(input.target_monitor);
         self.config.profiles_mut().push(profile);
         Ok(id)
     }
@@ -243,18 +275,80 @@ impl LifecycleCoordinator {
         self.config.profiles().iter().find(|p| p.id() == id)
     }
 
+    /// Mengambil referensi penyedia monitor.
+    pub fn monitor_provider(&self) -> &Arc<dyn MonitorProvider> {
+        &self.monitor_provider
+    }
+
+    /// Mengambil daftar semua monitor yang terdeteksi dan aktif saat ini.
+    pub fn available_monitors(&self) -> Result<Vec<MonitorDescriptor>, ApplicationError> {
+        self.monitor_provider
+            .available_monitors()
+            .map_err(ApplicationError::Platform)
+    }
+
+    /// Mengevaluasi status kecocokan monitor tujuan untuk profil tertentu.
+    pub fn get_target_monitor_status(
+        &self,
+        id: &ProfileId,
+    ) -> Result<TargetMonitorStatus, ApplicationError> {
+        let profile = self
+            .get_profile(id)
+            .ok_or_else(|| ApplicationError::ProfileNotFound { id: id.clone() })?;
+
+        if profile.target_monitor().is_none() {
+            return Ok(TargetMonitorStatus::Unset);
+        }
+
+        let monitors = self.available_monitors()?;
+        Ok(profile.evaluate_target_monitor(&monitors))
+    }
+
+    /// Mengevaluasi status kesiapan profil tertentu berdasarkan ketersediaan monitor tujuan saat ini.
+    pub fn get_profile_status(&self, id: &ProfileId) -> Result<ProfileStatus, ApplicationError> {
+        let profile = self
+            .get_profile(id)
+            .ok_or_else(|| ApplicationError::ProfileNotFound { id: id.clone() })?;
+
+        if profile.target_monitor().is_none() {
+            return Ok(ProfileStatus::DraftNotReady);
+        }
+
+        let monitors = self.available_monitors()?;
+        Ok(profile.evaluate_status(&monitors))
+    }
+
     /// Memeriksa apakah suatu profil dapat diaktifkan.
-    /// Profil draft tanpa monitor tujuan tidak dapat diaktifkan.
+    /// Profil belum dapat diaktifkan jika monitor tujuan belum dipilih, tidak tersedia,
+    /// atau ambigu. Tidak ada fallback otomatis ke primary atau monitor lain.
     pub fn can_activate(&self, id: &ProfileId) -> Result<bool, ApplicationError> {
         let profile = self
             .get_profile(id)
             .ok_or_else(|| ApplicationError::ProfileNotFound { id: id.clone() })?;
 
-        if profile.status() == ProfileStatus::DraftNotReady {
+        if profile.target_monitor().is_none() {
             return Err(ApplicationError::DraftNotReady { id: id.clone() });
         }
 
-        Ok(true)
+        let monitors = self.available_monitors()?;
+        match profile.evaluate_target_monitor(&monitors) {
+            TargetMonitorStatus::Unset => Err(ApplicationError::DraftNotReady { id: id.clone() }),
+            TargetMonitorStatus::Unavailable { recorded_identity } => {
+                Err(ApplicationError::TargetMonitorUnavailable {
+                    id: id.clone(),
+                    recorded_identity,
+                })
+            }
+            TargetMonitorStatus::Ambiguous {
+                recorded_identity,
+                match_count,
+            } => Err(ApplicationError::TargetMonitorAmbiguous {
+                id: id.clone(),
+                recorded_identity,
+                match_count,
+            }),
+            TargetMonitorStatus::Available(_) => Ok(true),
+        }
     }
 
     /// Mengambil pesan error terakhir yang terjadi (jika ada) untuk ditampilkan pada UI.

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use tempfile::tempdir;
-use window_hop::domain::{AppConfig, Profile, ProfileId, ProfileStatus};
+use window_hop::domain::{AppConfig, MonitorIdentity, Profile, ProfileId, ProfileStatus};
 use window_hop::persistence::{FileProfileStore, PersistenceError, ProfileStore};
 
 #[test]
@@ -33,6 +33,41 @@ fn test_file_profile_store_saves_and_loads_draft_profile() {
         profile.custom_parameters()
     );
     assert_eq!(loaded.profiles()[0].status(), ProfileStatus::DraftNotReady);
+}
+
+#[test]
+fn test_file_profile_store_saves_and_loads_profile_with_target_monitor() {
+    let dir = tempdir().expect("temp dir");
+    let file_path = dir.path().join("profiles_with_target.json");
+    let store = FileProfileStore::new(&file_path);
+
+    let mut profile = Profile::new_draft(
+        ProfileId::new("p-target"),
+        "Antrian Poli Bedah Saraf",
+        PathBuf::from(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+        "--app=https://antrian.saraf.local --kiosk",
+    );
+    let target_identity = MonitorIdentity::new("DEL-P2419H-UID-99881122");
+    profile.set_target_monitor(Some(target_identity.clone()));
+
+    let config = AppConfig::new(1, vec![profile.clone()]);
+    store
+        .save(&config)
+        .expect("save config with target monitor");
+
+    // Inspect JSON raw string to ensure target_monitor is saved cleanly
+    let raw_json = std::fs::read_to_string(&file_path).expect("read raw json");
+    assert!(
+        raw_json.contains("DEL-P2419H-UID-99881122"),
+        "Serialized json must contain recorded monitor identity string"
+    );
+
+    let loaded = store.load().expect("load config with target monitor");
+    assert_eq!(loaded.profiles().len(), 1);
+    let loaded_p = &loaded.profiles()[0];
+    assert_eq!(loaded_p.id(), profile.id());
+    assert_eq!(loaded_p.name(), profile.name());
+    assert_eq!(loaded_p.target_monitor(), Some(&target_identity));
 }
 
 #[test]

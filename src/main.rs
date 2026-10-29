@@ -7,7 +7,7 @@ use window_hop::ui::WindowHopView;
 fn main() {
     let config_path = default_config_path();
     let store = Arc::new(FileProfileStore::new(config_path));
-    let mut coordinator = LifecycleCoordinator::new(store);
+    let mut coordinator = LifecycleCoordinator::from_store(store);
     let _ = coordinator.load();
 
     gpui_kit::application().run(move |cx| {
