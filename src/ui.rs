@@ -156,6 +156,15 @@ impl WindowHopView {
             .filter(|p| coord.has_running_config_changes(p.id()))
             .map(|p| p.id().clone())
             .collect();
+
+        // Jika tidak ada pesan status aktif dari aksi pengguna dan koordinator mencatat kesalahan otomatis,
+        // tampilkan pesan kesalahan otomatis pada UI detail tanpa popup atau mencuri fokus
+        if self.status_message.is_none() {
+            if let Some(err) = coord.last_error() {
+                self.status_message = Some(err.to_string());
+                self.is_error = true;
+            }
+        }
     }
 
     /// Memperbarui cache daftar monitor yang terdeteksi secara manual atau saat ada perubahan.

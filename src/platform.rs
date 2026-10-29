@@ -1,7 +1,7 @@
 //! Platform abstraction boundaries for OS display, process lifecycle, and integration.
 
 use crate::browsers::LaunchPlan;
-use crate::domain::{MonitorDescriptor, ProcessId, ProfileId};
+use crate::domain::{MonitorDescriptor, ProcessId, ProfileId, TrayStatusSummary};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -350,6 +350,21 @@ impl ProcessLauncher for MockProcessLauncher {
 /// Flag argumen baris perintah untuk aktivasi profil langsung lewat shortcut.
 pub const ACTIVATE_PROFILE_FLAG: &str = "--activate-profile";
 
+/// Flag argumen baris perintah untuk mode mulai otomatis login atau di latar belakang (tray).
+pub const STARTUP_FLAG: &str = "--startup";
+pub const SILENT_FLAG: &str = "--silent";
+pub const TRAY_FLAG: &str = "--tray";
+
+/// Memeriksa apakah argumen mengandung flag mulai di tray/headless tanpa membuka pengaturan.
+pub fn parse_silent_or_startup_flag<I>(args: I) -> bool
+where
+    I: IntoIterator<Item = String>,
+{
+    let args: Vec<String> = args.into_iter().collect();
+    args.iter()
+        .any(|arg| arg == STARTUP_FLAG || arg == SILENT_FLAG || arg == TRAY_FLAG)
+}
+
 /// Membaca flag `--activate-profile <PROFILE_ID>` dari argumen baris perintah jika ada.
 pub fn parse_activation_flag<I>(args: I) -> Option<ProfileId>
 where
@@ -466,6 +481,8 @@ impl ShortcutCreator for MockShortcutCreator {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActivationCommand {
     ActivateProfile(ProfileId),
+    OpenSettings,
+    Ping,
 }
 
 /// Seam antarmuka koordinasi single-instance dan transmisi aktivasi antar-proses.
@@ -672,11 +689,119 @@ impl SingleInstanceCoordinator for LocalSingleInstanceCoordinator {
     }
 }
 
+/// Aksi yang dipicu melalui interaksi pengguna pada system tray.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TrayAction {
+    /// Buka jendela pengaturan Window Hop (atau bawa ke depan).
+    OpenSettings,
+    /// Keluar dari Window Hop (tutup browser terkelola lalu keluar).
+    Exit,
+}
+
+/// Handler fungsi penerima aksi interaksi system tray.
+pub type TrayActionHandler = Arc<dyn Fn(TrayAction) + Send + Sync>;
+
+/// Seam antarmuka penyedia system tray sistem operasi.
+pub trait TrayProvider: Send + Sync {
+    /// Memperbarui ikon dan teks status/tooltip pada system tray.
+    fn update_status(&self, summary: &TrayStatusSummary) -> Result<(), PlatformError>;
+
+    /// Mendaftarkan listener callback aksi tray (Buka Pengaturan, Keluar).
+    fn set_action_handler(
+        &self,
+        handler: Box<dyn Fn(TrayAction) + Send + Sync>,
+    ) -> Result<(), PlatformError>;
+
+    /// Menghapus ikon tray dari notification area saat aplikasi berhenti.
+    fn remove_tray(&self) -> Result<(), PlatformError>;
+}
+
+/// Implementasi tiruan (mock) dari TrayProvider untuk pengujian deterministik tanpa ketergantungan OS.
+pub struct MockTrayProvider {
+    status: Mutex<Option<TrayStatusSummary>>,
+    action_handler: Mutex<Option<TrayActionHandler>>,
+    removed: AtomicBool,
+    update_count: AtomicUsize,
+    error: Mutex<Option<String>>,
+}
+
+impl MockTrayProvider {
+    pub fn new() -> Self {
+        Self {
+            status: Mutex::new(None),
+            action_handler: Mutex::new(None),
+            removed: AtomicBool::new(false),
+            update_count: AtomicUsize::new(0),
+            error: Mutex::new(None),
+        }
+    }
+
+    /// Mengambil status terakhir yang dikirim ke tray.
+    pub fn last_status(&self) -> Option<TrayStatusSummary> {
+        self.status.lock().unwrap().clone()
+    }
+
+    /// Memicu aksi tray (misal simulasi klik "Buka Pengaturan" atau "Keluar").
+    pub fn trigger_action(&self, action: TrayAction) {
+        let handler = self.action_handler.lock().unwrap().clone();
+        if let Some(h) = handler {
+            h(action);
+        }
+    }
+
+    /// Memeriksa apakah ikon tray telah dihapus.
+    pub fn is_removed(&self) -> bool {
+        self.removed.load(Ordering::SeqCst)
+    }
+
+    /// Menghitung berapa kali status tray diperbarui.
+    pub fn update_count(&self) -> usize {
+        self.update_count.load(Ordering::SeqCst)
+    }
+
+    /// Mengatur simulasi kesalahan platform.
+    pub fn set_error(&self, error: Option<String>) {
+        *self.error.lock().unwrap() = error;
+    }
+}
+
+impl Default for MockTrayProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TrayProvider for MockTrayProvider {
+    fn update_status(&self, summary: &TrayStatusSummary) -> Result<(), PlatformError> {
+        if let Some(ref err) = *self.error.lock().unwrap() {
+            return Err(PlatformError::Os(err.clone()));
+        }
+        *self.status.lock().unwrap() = Some(summary.clone());
+        self.update_count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn set_action_handler(
+        &self,
+        handler: Box<dyn Fn(TrayAction) + Send + Sync>,
+    ) -> Result<(), PlatformError> {
+        *self.action_handler.lock().unwrap() = Some(Arc::from(handler));
+        Ok(())
+    }
+
+    fn remove_tray(&self) -> Result<(), PlatformError> {
+        self.removed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 #[cfg(windows)]
 pub mod windows;
 
 #[cfg(windows)]
-pub use windows::{WindowsMonitorProvider, WindowsProcessLauncher, WindowsShortcutCreator};
+pub use windows::{
+    WindowsMonitorProvider, WindowsProcessLauncher, WindowsShortcutCreator, WindowsTrayProvider,
+};
 
 #[cfg(not(windows))]
 /// Substitut monitor provider untuk lingkungan non-Windows yang melaporkan kapabilitas tidak tersedia.
@@ -728,6 +853,28 @@ impl ShortcutCreator for NonWindowsShortcutCreator {
     }
 }
 
+#[cfg(not(windows))]
+/// Substitut penyedia system tray untuk lingkungan non-Windows.
+pub struct NonWindowsTrayProvider;
+
+#[cfg(not(windows))]
+impl TrayProvider for NonWindowsTrayProvider {
+    fn update_status(&self, _summary: &TrayStatusSummary) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
+    fn set_action_handler(
+        &self,
+        _handler: Box<dyn Fn(TrayAction) + Send + Sync>,
+    ) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
+    fn remove_tray(&self) -> Result<(), PlatformError> {
+        Ok(())
+    }
+}
+
 /// Mengembalikan penyedia monitor default untuk platform saat ini.
 pub fn default_monitor_provider() -> Arc<dyn MonitorProvider> {
     #[cfg(windows)]
@@ -770,4 +917,17 @@ pub fn default_process_launcher() -> Arc<dyn ProcessLauncher> {
 /// Mengembalikan jam default sistem.
 pub fn default_clock() -> Arc<dyn Clock> {
     Arc::new(SystemClock::new())
+}
+
+/// Mengembalikan penyedia system tray default untuk platform saat ini.
+pub fn default_tray_provider() -> Arc<dyn TrayProvider> {
+    #[cfg(windows)]
+    {
+        Arc::new(WindowsTrayProvider::new())
+    }
+
+    #[cfg(not(windows))]
+    {
+        Arc::new(NonWindowsTrayProvider)
+    }
 }

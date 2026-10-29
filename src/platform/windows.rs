@@ -1,20 +1,33 @@
 //! Windows display and monitor enumeration using Win32 APIs.
 
 use crate::browsers::LaunchPlan;
-use crate::domain::{MonitorDescriptor, MonitorIdentity, ProcessId};
-use crate::platform::{ManagedProcess, MonitorProvider, PlatformError, ProcessLauncher};
+use crate::domain::{MonitorDescriptor, MonitorIdentity, ProcessId, TrayStatusSummary};
+use crate::platform::{
+    ManagedProcess, MonitorProvider, PlatformError, ProcessLauncher, ShortcutCreator, ShortcutSpec,
+    TrayAction, TrayActionHandler, TrayProvider,
+};
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayDevicesW, EnumDisplayMonitors, GetMonitorInfoW, DISPLAY_DEVICEW,
     DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICE_PRIMARY_DEVICE, HDC, HMONITOR,
     MONITORINFOEXW,
 };
+use windows::Win32::UI::Shell::{
+    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NOTIFYICONDATAW,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowThreadProcessId, PostMessageW, SetWindowPos, SWP_NOACTIVATE,
-    SWP_NOZORDER, WM_CLOSE,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
+    DispatchMessageW, EnumWindows, GetCursorPos, GetMessageW, GetWindowThreadProcessId, LoadIconW,
+    PostMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow, SetWindowPos,
+    TrackPopupMenu, TranslateMessage, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, IDI_APPLICATION,
+    MF_DISABLED, MF_SEPARATOR, MF_STRING, SWP_NOACTIVATE, SWP_NOZORDER, TPM_NONOTIFY,
+    TPM_RETURNCMD, WM_APP, WM_CLOSE, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP,
+    WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
 /// Implementasi MonitorProvider untuk sistem operasi Windows.
@@ -442,5 +455,332 @@ impl crate::platform::ShortcutCreator for WindowsShortcutCreator {
         }
 
         Ok(shortcut_path)
+    }
+}
+
+const WM_TRAY_CALLBACK: u32 = WM_APP + 10;
+const WM_TRAY_UPDATE: u32 = WM_APP + 11;
+const ID_MENU_OPEN_SETTINGS: usize = 1001;
+const ID_MENU_STATUS_INFO: usize = 1002;
+const ID_MENU_EXIT: usize = 1003;
+
+struct TraySharedState {
+    summary: Mutex<Option<TrayStatusSummary>>,
+    action_handler: Mutex<Option<TrayActionHandler>>,
+}
+
+/// Implementasi TrayProvider native untuk Windows menggunakan Win32 Shell_NotifyIcon.
+pub struct WindowsTrayProvider {
+    shared_state: Arc<TraySharedState>,
+    hwnd_raw: Mutex<Option<isize>>,
+    removed: AtomicBool,
+}
+
+impl WindowsTrayProvider {
+    pub fn new() -> Self {
+        let shared_state = Arc::new(TraySharedState {
+            summary: Mutex::new(None),
+            action_handler: Mutex::new(None),
+        });
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread_state = shared_state.clone();
+
+        std::thread::spawn(move || {
+            // Jalankan loop pesan Win32 pada thread terpisah agar tidak membekukan UI GPUI
+            Self::run_tray_message_loop(thread_state, tx);
+        });
+
+        let hwnd_raw = match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+            Ok(Ok(hwnd_val)) => Some(hwnd_val),
+            _ => None,
+        };
+
+        Self {
+            shared_state,
+            hwnd_raw: Mutex::new(hwnd_raw),
+            removed: AtomicBool::new(false),
+        }
+    }
+
+    fn run_tray_message_loop(
+        shared_state: Arc<TraySharedState>,
+        tx: std::sync::mpsc::Sender<Result<isize, PlatformError>>,
+    ) {
+        // Daftarkan window class unik untuk hidden window penampung tray icon
+        let class_name: Vec<u16> = "WindowHopTrayMessageWindowClass\0".encode_utf16().collect();
+
+        // SAFETY: WNDCLASSW diinisialisasi nol terlebih dahulu sesuai kontrak Win32 API.
+        let mut wc: WNDCLASSW = unsafe { std::mem::zeroed() };
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = Some(Self::tray_wndproc);
+        wc.lpszClassName = PCWSTR(class_name.as_ptr());
+        // SAFETY: LoadIconW dipanggil dengan IDI_APPLICATION standar Windows.
+        wc.hIcon = unsafe { LoadIconW(None, IDI_APPLICATION).unwrap_or_default() };
+
+        // SAFETY: RegisterClassW dipanggil dengan class name yang valid dan null-terminated.
+        unsafe { RegisterClassW(&wc) };
+
+        // Buat jendela tersembunyi (hidden window) khusus untuk menangkap pesan tray
+        // SAFETY: CreateWindowExW dipanggil dengan class_name yang baru saja didaftarkan.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE(0),
+                PCWSTR(class_name.as_ptr()),
+                PCWSTR(class_name.as_ptr()),
+                WS_OVERLAPPEDWINDOW,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+
+        if hwnd.0.is_null() {
+            let _ = tx.send(Err(PlatformError::Os(
+                "Gagal membuat window penampung notifikasi system tray".to_string(),
+            )));
+            return;
+        }
+
+        // Daftarkan ikon tray ke Shell Windows
+        let nid = Self::build_notify_icon_data(hwnd, "Window Hop - Siap");
+        // SAFETY: Shell_NotifyIconW NIM_ADD dipanggil dengan NOTIFYICONDATAW yang telah diinisialisasi.
+        unsafe {
+            Shell_NotifyIconW(NIM_ADD, &nid);
+        };
+
+        // Simpan pointer ke shared_state pada GWLP_USERDATA agar wndproc dapat mengaksesnya
+        let state_ptr = Arc::into_raw(shared_state) as isize;
+        // SAFETY: SetWindowLongPtrW mengatur GWLP_USERDATA window handle milik thread ini.
+        #[cfg(target_pointer_width = "64")]
+        unsafe {
+            windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(
+                hwnd,
+                windows::Win32::UI::WindowsAndMessaging::GWLP_USERDATA,
+                state_ptr,
+            );
+        }
+
+        let hwnd_raw_val = hwnd.0 as isize;
+        // Kirimkan HWND ke thread pemanggil segera setelah window dibuat sebelum memasuki blocking message loop
+        let _ = tx.send(Ok(hwnd_raw_val));
+
+        // Loop penanganan pesan Win32 standar
+        // SAFETY: MSG struct diinisialisasi nol sebelum pemanggilan GetMessageW.
+        unsafe {
+            let mut msg = std::mem::zeroed();
+            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    }
+
+    fn build_notify_icon_data(hwnd: HWND, tooltip: &str) -> NOTIFYICONDATAW {
+        // SAFETY: NOTIFYICONDATAW diinisialisasi nol sebelum mengatur ukuran struct dan properti.
+        let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
+        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        nid.hWnd = hwnd;
+        nid.uID = 1;
+        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        nid.uCallbackMessage = WM_TRAY_CALLBACK;
+        // SAFETY: LoadIconW mengambil icon aplikasi standar.
+        nid.hIcon = unsafe { LoadIconW(None, IDI_APPLICATION).unwrap_or_default() };
+
+        let wide_tip: Vec<u16> = tooltip.encode_utf16().collect();
+        let len = wide_tip.len().min(127);
+        nid.szTip[..len].copy_from_slice(&wide_tip[..len]);
+        nid.szTip[len] = 0;
+
+        nid
+    }
+
+    unsafe extern "system" fn tray_wndproc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        // Ambil pointer state dari GWLP_USERDATA
+        let raw_ptr = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
+            hwnd,
+            windows::Win32::UI::WindowsAndMessaging::GWLP_USERDATA,
+        );
+
+        if raw_ptr != 0 {
+            let state = &*(raw_ptr as *const TraySharedState);
+
+            match msg {
+                WM_TRAY_UPDATE => {
+                    let tooltip_text = {
+                        let guard = state.summary.lock().unwrap();
+                        guard
+                            .as_ref()
+                            .map(|s| s.tooltip.clone())
+                            .unwrap_or_else(|| "Window Hop".to_string())
+                    };
+                    let nid = Self::build_notify_icon_data(hwnd, &tooltip_text);
+                    Shell_NotifyIconW(NIM_MODIFY, &nid);
+                    return LRESULT(0);
+                }
+                WM_TRAY_CALLBACK => {
+                    let event = (lparam.0 & 0xffff) as u32;
+                    if event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK {
+                        let handler = state.action_handler.lock().unwrap().clone();
+                        if let Some(h) = handler {
+                            h(TrayAction::OpenSettings);
+                        }
+                        return LRESULT(0);
+                    } else if event == WM_RBUTTONUP {
+                        let mut pt = POINT { x: 0, y: 0 };
+                        GetCursorPos(&mut pt);
+
+                        let hmenu = CreatePopupMenu().unwrap_or_default();
+                        if !hmenu.0.is_null() {
+                            let open_label: Vec<u16> = "Buka Pengaturan\0".encode_utf16().collect();
+                            AppendMenuW(
+                                hmenu,
+                                MF_STRING,
+                                ID_MENU_OPEN_SETTINGS,
+                                PCWSTR(open_label.as_ptr()),
+                            );
+
+                            let status_text = {
+                                let guard = state.summary.lock().unwrap();
+                                guard
+                                    .as_ref()
+                                    .map(|s| format!("Status: {}", s.status_text))
+                                    .unwrap_or_else(|| "Status: Siap".to_string())
+                            };
+                            let status_label: Vec<u16> =
+                                format!("{}\0", status_text).encode_utf16().collect();
+                            AppendMenuW(
+                                hmenu,
+                                MF_STRING | MF_DISABLED,
+                                ID_MENU_STATUS_INFO,
+                                PCWSTR(status_label.as_ptr()),
+                            );
+
+                            AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+
+                            let exit_label: Vec<u16> =
+                                "Keluar dari Window Hop\0".encode_utf16().collect();
+                            AppendMenuW(
+                                hmenu,
+                                MF_STRING,
+                                ID_MENU_EXIT,
+                                PCWSTR(exit_label.as_ptr()),
+                            );
+
+                            SetForegroundWindow(hwnd);
+                            let cmd = TrackPopupMenu(
+                                hmenu,
+                                TPM_RETURNCMD | TPM_NONOTIFY,
+                                pt.x,
+                                pt.y,
+                                0,
+                                hwnd,
+                                None,
+                            );
+                            DestroyMenu(hmenu);
+                            // Sesuai panduan Microsoft KB135788 untuk TrackPopupMenu notifikasi tray:
+                            // kirimkan WM_NULL agar popup menu menutup otomatis saat pengguna mengklik jendela lain
+                            unsafe {
+                                windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                                    Some(hwnd),
+                                    windows::Win32::UI::WindowsAndMessaging::WM_NULL,
+                                    WPARAM(0),
+                                    LPARAM(0),
+                                );
+                            }
+
+                            if cmd.0 as usize == ID_MENU_OPEN_SETTINGS {
+                                let handler = state.action_handler.lock().unwrap().clone();
+                                if let Some(h) = handler {
+                                    h(TrayAction::OpenSettings);
+                                }
+                            } else if cmd.0 as usize == ID_MENU_EXIT {
+                                let handler = state.action_handler.lock().unwrap().clone();
+                                if let Some(h) = handler {
+                                    h(TrayAction::Exit);
+                                }
+                            }
+                        }
+                        return LRESULT(0);
+                    }
+                }
+                WM_CLOSE => {
+                    let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+                    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+                    nid.hWnd = hwnd;
+                    nid.uID = 1;
+                    Shell_NotifyIconW(NIM_DELETE, &nid);
+                    DestroyWindow(hwnd);
+                    return LRESULT(0);
+                }
+                WM_DESTROY => {
+                    PostQuitMessage(0);
+                    return LRESULT(0);
+                }
+                _ => {}
+            }
+        }
+
+        DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+}
+
+impl Default for WindowsTrayProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TrayProvider for WindowsTrayProvider {
+    fn update_status(&self, summary: &TrayStatusSummary) -> Result<(), PlatformError> {
+        *self.shared_state.summary.lock().unwrap() = Some(summary.clone());
+        let hwnd_guard = self.hwnd_raw.lock().unwrap();
+        if let Some(raw) = *hwnd_guard {
+            let hwnd = HWND(raw as *mut std::ffi::c_void);
+            // SAFETY: PostMessageW memicu pembaruan tooltip tray pada thread pesan Win32.
+            unsafe {
+                PostMessageW(Some(hwnd), WM_TRAY_UPDATE, WPARAM(0), LPARAM(0));
+            }
+        }
+        Ok(())
+    }
+
+    fn set_action_handler(
+        &self,
+        handler: Box<dyn Fn(TrayAction) + Send + Sync>,
+    ) -> Result<(), PlatformError> {
+        *self.shared_state.action_handler.lock().unwrap() = Some(Arc::from(handler));
+        Ok(())
+    }
+
+    fn remove_tray(&self) -> Result<(), PlatformError> {
+        if self.removed.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        let hwnd_guard = self.hwnd_raw.lock().unwrap();
+        if let Some(raw) = *hwnd_guard {
+            let hwnd = HWND(raw as *mut std::ffi::c_void);
+            // SAFETY: PostMessageW mengirim WM_CLOSE agar thread tray menghapus ikon dan berhenti dengan bersih.
+            unsafe {
+                PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for WindowsTrayProvider {
+    fn drop(&mut self) {
+        let _ = self.remove_tray();
     }
 }

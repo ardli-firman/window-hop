@@ -422,3 +422,53 @@ impl Default for AppConfig {
         }
     }
 }
+
+/// Ringkasan status keseluruhan Window Hop untuk ditampilkan pada system tray dan indikator ringkas.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrayStatusSummary {
+    /// Teks ringkas status (misal: "1 profil berjalan", "Menunggu monitor tujuan", "Siap").
+    pub status_text: String,
+    /// Tooltip lengkap untuk ikon system tray.
+    pub tooltip: String,
+    /// Jumlah profil yang sedang berjalan aktif.
+    pub running_count: usize,
+    /// Jumlah profil yang sedang menunggu monitor tujuan atau terputus.
+    pub waiting_count: usize,
+    /// Apakah terdapat kesalahan otomatis terakhir.
+    pub has_error: bool,
+    /// Pesan kesalahan terakhir jika ada.
+    pub last_error: Option<String>,
+}
+
+impl TrayStatusSummary {
+    /// Membuat instance baru TrayStatusSummary.
+    pub fn new(
+        status_text: impl Into<String>,
+        tooltip: impl Into<String>,
+        running_count: usize,
+        waiting_count: usize,
+        has_error: bool,
+        last_error: Option<String>,
+    ) -> Self {
+        Self {
+            status_text: status_text.into(),
+            tooltip: tooltip.into(),
+            running_count,
+            waiting_count,
+            has_error,
+            last_error,
+        }
+    }
+
+    /// Status siap default (idle).
+    pub fn idle() -> Self {
+        Self {
+            status_text: "Siap (tidak ada profil aktif)".to_string(),
+            tooltip: "Window Hop: Siap".to_string(),
+            running_count: 0,
+            waiting_count: 0,
+            has_error: false,
+            last_error: None,
+        }
+    }
+}
