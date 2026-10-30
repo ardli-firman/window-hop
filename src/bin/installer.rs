@@ -19,7 +19,7 @@ fn print_help() {
             -d, --dir <PATH>       Tentukan direktori tujuan instalasi khusus\n                           \
                                    (default: %LOCALAPPDATA%\\Programs\\Window Hop)\n    \
             -s, --source <PATH>    Tentukan path berkas executable window-hop.exe sumber\n    \
-            -q, --silent           Mode senyap (tanpa konfirmasi interaktif)\n    \
+            -q, --silent           Mode senyap (tanpa keluaran stdout)\n    \
             -h, --help             Tampilkan bantuan ini\n",
         env!("CARGO_PKG_VERSION")
     );
@@ -28,6 +28,8 @@ fn print_help() {
 fn detect_current_os() -> Result<OsVersion, InstallError> {
     #[cfg(windows)]
     {
+        use window_hop::installer::Arch;
+
         // Deteksi arsitektur via environment PROCESSOR_ARCHITECTURE
         let arch = match env::var("PROCESSOR_ARCHITECTURE").as_deref() {
             Ok("AMD64") | Ok("x86_64") => Arch::X64,
@@ -104,7 +106,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let mut custom_dir = None;
     let mut custom_source = None;
-    let mut _is_silent = false;
+    let mut is_silent = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -114,7 +116,7 @@ fn main() {
                 return;
             }
             "-q" | "--silent" => {
-                _is_silent = true;
+                is_silent = true;
             }
             "-d" | "--dir" => {
                 if i + 1 < args.len() {
@@ -174,7 +176,9 @@ fn main() {
         }
     };
 
-    println!("Memasang Window Hop ke: {}", install_dir.display());
+    if !is_silent {
+        println!("Memasang Window Hop ke: {}", install_dir.display());
+    }
     let options = InstallOptions {
         install_dir: install_dir.clone(),
         source_exe,
@@ -183,17 +187,19 @@ fn main() {
 
     match install(&options) {
         Ok(receipt) => {
-            println!("\nInstalasi Window Hop berhasil diselesaikan!");
-            println!("  Versi:       {}", receipt.version);
-            println!("  Lokasi:      {}", receipt.installed_exe.display());
-            println!(
-                "  Berkas lain: {} berkas terpasang",
-                receipt.installed_files.len()
-            );
-            println!(
-                "  Dokumentasi: {}",
-                receipt.install_dir.join("INSTALL-GUIDE.txt").display()
-            );
+            if !is_silent {
+                println!("\nInstalasi Window Hop berhasil diselesaikan!");
+                println!("  Versi:       {}", receipt.version);
+                println!("  Lokasi:      {}", receipt.installed_exe.display());
+                println!(
+                    "  Berkas lain: {} berkas terpasang",
+                    receipt.installed_files.len()
+                );
+                println!(
+                    "  Dokumentasi: {}",
+                    receipt.install_dir.join("INSTALL-GUIDE.txt").display()
+                );
+            }
             std::process::exit(0);
         }
         Err(e) => {

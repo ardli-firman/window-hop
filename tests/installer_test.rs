@@ -30,6 +30,12 @@ fn test_is_dev_build_path_detects_target_debug_and_release() {
         "C:\\projects\\window-hop\\target\\release\\window-hop.exe"
     )));
     assert!(is_dev_build_path(Path::new(
+        "C:\\Projects\\Window-Hop\\Target\\Debug\\window-hop.exe"
+    )));
+    assert!(is_dev_build_path(Path::new(
+        "C:\\REPO\\TARGET\\RELEASE\\window-hop.exe"
+    )));
+    assert!(is_dev_build_path(Path::new(
         "/home/user/window-hop/target/debug/window-hop"
     )));
     assert!(is_dev_build_path(Path::new(
@@ -154,6 +160,13 @@ fn test_install_copies_executable_resources_and_creates_manifest() {
     assert!(
         manifest_path.exists(),
         "install-manifest.json must be created"
+    );
+    let manifest_raw = fs::read_to_string(&manifest_path).unwrap();
+    assert!(
+        manifest_raw.contains("installed_at")
+            && manifest_raw.contains("T")
+            && manifest_raw.contains("Z"),
+        "Manifest must include a valid ISO-8601 UTC timestamp"
     );
 
     // Verify verify_installation succeeds
