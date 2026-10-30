@@ -239,12 +239,11 @@ impl EdgeAdapter {
     }
 }
 
-/// Arsitektur biner executable browser (x86, x64, ARM64, atau tidak diketahui).
+/// Arsitektur biner executable browser (x86, x64, atau tidak diketahui).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BrowserArchitecture {
     X86,
     X64,
-    Arm64,
     Unknown,
 }
 
@@ -253,7 +252,6 @@ impl fmt::Display for BrowserArchitecture {
         match self {
             Self::X86 => write!(f, "x86 (32-bit)"),
             Self::X64 => write!(f, "x64 (64-bit)"),
-            Self::Arm64 => write!(f, "ARM64"),
             Self::Unknown => write!(f, "Tidak Diketahui"),
         }
     }
@@ -304,9 +302,8 @@ pub fn read_executable_architecture(path: &Path) -> BrowserArchitecture {
     // Machine architecture pada offset pe_header + 4 (2 bytes little-endian)
     let machine = u16::from_le_bytes([pe_header[4], pe_header[5]]);
     match machine {
-        0x014c => BrowserArchitecture::X86,   // IMAGE_FILE_MACHINE_I386
-        0x8664 => BrowserArchitecture::X64,   // IMAGE_FILE_MACHINE_AMD64
-        0xaa64 => BrowserArchitecture::Arm64, // IMAGE_FILE_MACHINE_ARM64
+        0x014c => BrowserArchitecture::X86, // IMAGE_FILE_MACHINE_I386
+        0x8664 => BrowserArchitecture::X64, // IMAGE_FILE_MACHINE_AMD64
         _ => BrowserArchitecture::Unknown,
     }
 }
@@ -376,6 +373,49 @@ impl BrowserCompatibilityStatus {
     }
 }
 
+/// Mengambil nama file executable dalam huruf kecil dari path (mendukung pemisah Windows '\\' maupun Unix '/').
+pub fn extract_executable_filename(executable: &Path) -> String {
+    let path_str = executable.to_string_lossy();
+    path_str
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+/// Memeriksa apakah file executable adalah Microsoft Edge.
+pub fn is_edge_executable(executable: &Path) -> bool {
+    let file_name = extract_executable_filename(executable);
+    file_name == "msedge.exe" || file_name == "msedge"
+}
+
+/// Mencoba membaca nomor versi browser dari direktori instalasi terkait jika tersedia.
+pub fn read_installed_browser_version(executable: &Path) -> Option<String> {
+    let parent = executable.parent()?;
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            if let Ok(file_type) = entry.file_type() {
+                if file_type.is_dir() {
+                    let dir_name = entry.file_name().to_string_lossy().to_string();
+                    if let Some(first_char) = dir_name.chars().next() {
+                        if first_char.is_ascii_digit() && dir_name.contains('.') {
+                            return Some(dir_name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+impl DetectedBrowser {
+    /// Memeriksa apakah browser terdeteksi memiliki adapter yang terverifikasi dan aman diaktifkan.
+    pub fn is_verified(&self) -> bool {
+        is_edge_executable(&self.executable_path)
+    }
+}
+
 /// Status dukungan verifikasi browser sederhana (kompatibilitas backward).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserSupportStatus {
@@ -387,14 +427,7 @@ pub enum BrowserSupportStatus {
 
 /// Mendeteksi apakah path executable merujuk ke browser yang terverifikasi (Edge).
 pub fn detect_browser_support(executable: &Path) -> BrowserSupportStatus {
-    let path_str = executable.to_string_lossy();
-    let file_name = path_str
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-
-    if file_name == "msedge.exe" || file_name == "msedge" {
+    if is_edge_executable(executable) {
         BrowserSupportStatus::Verified(EdgeAdapter::new())
     } else {
         BrowserSupportStatus::Unverified
@@ -404,7 +437,15 @@ pub fn detect_browser_support(executable: &Path) -> BrowserSupportStatus {
 /// Mengevaluasi status kompatibilitas browser secara lengkap dan jujur berdasarkan keberadaan file,
 /// arsitektur biner, dan adapter yang terverifikasi.
 pub fn evaluate_browser_compatibility(executable: &Path) -> BrowserCompatibilityStatus {
-    if !executable.exists() || !executable.is_file() {
+    let path_str = executable.to_string_lossy();
+    let is_simulated_windows =
+        cfg!(not(windows)) && (path_str.starts_with("C:") || path_str.starts_with("c:"));
+    let is_single_command = !executable.is_absolute() && executable.components().count() == 1;
+
+    if !is_simulated_windows
+        && !is_single_command
+        && (!executable.exists() || !executable.is_file())
+    {
         return BrowserCompatibilityStatus::Unavailable {
             path: executable.to_path_buf(),
             reason: format!(
@@ -415,20 +456,16 @@ pub fn evaluate_browser_compatibility(executable: &Path) -> BrowserCompatibility
     }
 
     let architecture = read_executable_architecture(executable);
-    let path_str = executable.to_string_lossy();
-    let file_name = path_str
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let version = read_installed_browser_version(executable);
+    let file_name = extract_executable_filename(executable);
 
-    if file_name == "msedge.exe" || file_name == "msedge" {
+    if is_edge_executable(executable) {
         let adapter = EdgeAdapter::new();
         BrowserCompatibilityStatus::SafeToActivate {
             adapter,
             evidence: BrowserSupportEvidence {
                 browser_name: "Microsoft Edge".to_string(),
-                version: None,
+                version,
                 architecture,
                 is_safe_to_activate: true,
                 evidence_text: "Dukungan pemisahan sesi browser profil (--user-data-dir) dan kepemilikan instance telah diverifikasi pada Windows 10/11 x64.".to_string(),
@@ -453,7 +490,7 @@ pub fn evaluate_browser_compatibility(executable: &Path) -> BrowserCompatibility
         BrowserCompatibilityStatus::Unverified {
             evidence: BrowserSupportEvidence {
                 browser_name,
-                version: None,
+                version,
                 architecture,
                 is_safe_to_activate: false,
                 evidence_text: "Browser ditemukan pada sistem, namun adapter pemisahan sesi dan kepemilikan instance belum diverifikasi pada Windows 10/11 x64. Profil dapat disimpan tetapi belum aman diaktifkan.".to_string(),

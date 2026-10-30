@@ -302,4 +302,19 @@ fn test_evaluate_browser_compatibility_distinguishes_verified_unverified_and_una
         }
         other => panic!("expected Unverified, got {:?}", other),
     }
+
+    // 6. Installed browser with sibling version folder (e.g. Edge Application\120.0.0.0)
+    let app_dir = temp_dir.path().join("edge_versioned");
+    let version_dir = app_dir.join("120.0.2210.144");
+    std::fs::create_dir_all(&version_dir).unwrap();
+    let edge_versioned_exe = create_mock_pe_file(&app_dir, "msedge.exe", 0x8664);
+    let status_versioned = evaluate_browser_compatibility(&edge_versioned_exe);
+    match status_versioned {
+        BrowserCompatibilityStatus::SafeToActivate { evidence, .. } => {
+            assert_eq!(evidence.version, Some("120.0.2210.144".to_string()));
+            assert_eq!(evidence.architecture, BrowserArchitecture::X64);
+            assert!(evidence.is_safe_to_activate);
+        }
+        other => panic!("expected SafeToActivate with version, got {:?}", other),
+    }
 }

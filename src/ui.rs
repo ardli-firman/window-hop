@@ -33,6 +33,8 @@ pub struct WindowHopView {
     monitors_error: Option<String>,
     cached_detected_browsers: Vec<DetectedBrowser>,
     detected_browsers_error: Option<String>,
+    last_evaluated_browser_path: Option<String>,
+    cached_browser_compatibility: Option<BrowserCompatibilityStatus>,
     window_handle: AnyWindowHandle,
     name_input: Entity<InputState>,
     path_input: Entity<InputState>,
@@ -151,6 +153,8 @@ impl WindowHopView {
             monitors_error,
             cached_detected_browsers,
             detected_browsers_error,
+            last_evaluated_browser_path: None,
+            cached_browser_compatibility: None,
             window_handle: window.window_handle(),
             name_input,
             path_input,
@@ -1379,9 +1383,8 @@ impl Render for WindowHopView {
                                                         } else {
                                                             (theme.muted.opacity(0.3), theme.border)
                                                         };
-                                                        let is_edge = b.name.contains("Edge")
-                                                            || b.executable_path.to_string_lossy().to_ascii_lowercase().contains("msedge");
-                                                        let status_badge = if is_edge {
+                                                        let is_verified = b.is_verified();
+                                                        let status_badge = if is_verified {
                                                             ("Terverifikasi", theme.primary)
                                                         } else {
                                                             ("Belum Diverifikasi", theme.warning)
@@ -1482,134 +1485,152 @@ impl Render for WindowHopView {
                             // Kartu Evaluasi Kompatibilitas Browser
                             .child({
                                 let raw_path = self.path_input.read(cx).value().trim().to_string();
-                                if raw_path.is_empty() {
-                                    div()
-                                        .p_2()
-                                        .rounded_md()
-                                        .bg(theme.muted)
-                                        .border_1()
-                                        .border_color(theme.border)
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child("ℹ Masukkan jalur file executable atau pilih browser terdeteksi di atas untuk memeriksa status kompatibilitas.")
-                                } else {
-                                    let compat = crate::browsers::evaluate_browser_compatibility(&PathBuf::from(&raw_path));
-                                    match compat {
-                                        BrowserCompatibilityStatus::SafeToActivate { adapter: _, evidence } => {
-                                            let limit_text = evidence.limitations.unwrap_or_default();
-                                            div()
-                                                .p_3()
-                                                .rounded_md()
-                                                .bg(theme.primary.opacity(0.12))
-                                                .border_1()
-                                                .border_color(theme.primary)
-                                                .child(
-                                                    v_flex()
-                                                        .gap_1()
-                                                        .child(
-                                                            h_flex()
-                                                                .gap_2()
-                                                                .items_center()
-                                                                .child(
-                                                                    div()
-                                                                        .font_weight(FontWeight::SEMIBOLD)
-                                                                        .text_xs()
-                                                                        .text_color(theme.primary)
-                                                                        .child("✓ Status Dukungan: Aman Diaktifkan (Terverifikasi)"),
-                                                                )
-                                                                .child(
-                                                                    div()
-                                                                        .text_xs()
-                                                                        .text_color(theme.muted_foreground)
-                                                                        .child(format!("{} [{}]", evidence.browser_name, evidence.architecture)),
-                                                                ),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .text_xs()
-                                                                .child(format!("Bukti: {}", evidence.evidence_text)),
-                                                        )
-                                                        .when(!limit_text.is_empty(), |this| {
-                                                            this.child(
+                                if self.last_evaluated_browser_path.as_deref() != Some(&raw_path) {
+                                    self.last_evaluated_browser_path = Some(raw_path.clone());
+                                    if raw_path.is_empty() {
+                                        self.cached_browser_compatibility = None;
+                                    } else if let Ok(coord) = self.coordinator.try_lock() {
+                                        self.cached_browser_compatibility =
+                                            Some(coord.check_browser_compatibility(&PathBuf::from(&raw_path)));
+                                    }
+                                }
+
+                                match self.cached_browser_compatibility.as_ref() {
+                                    None => {
+                                        div()
+                                            .p_2()
+                                            .rounded_md()
+                                            .bg(theme.muted)
+                                            .border_1()
+                                            .border_color(theme.border)
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child("ℹ Masukkan jalur file executable atau pilih browser terdeteksi di atas untuk memeriksa status kompatibilitas.")
+                                    }
+                                    Some(BrowserCompatibilityStatus::SafeToActivate { adapter: _, evidence }) => {
+                                        let limit_text = evidence.limitations.clone().unwrap_or_default();
+                                        let version_text = evidence
+                                            .version
+                                            .as_ref()
+                                            .map(|v| format!(" v{}", v))
+                                            .unwrap_or_default();
+                                        div()
+                                            .p_3()
+                                            .rounded_md()
+                                            .bg(theme.primary.opacity(0.12))
+                                            .border_1()
+                                            .border_color(theme.primary)
+                                            .child(
+                                                v_flex()
+                                                    .gap_1()
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_2()
+                                                            .items_center()
+                                                            .child(
+                                                                div()
+                                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                                    .text_xs()
+                                                                    .text_color(theme.primary)
+                                                                    .child("✓ Status Dukungan: Aman Diaktifkan (Terverifikasi)"),
+                                                            )
+                                                            .child(
                                                                 div()
                                                                     .text_xs()
                                                                     .text_color(theme.muted_foreground)
-                                                                    .child(format!("Batasan: {}", limit_text)),
-                                                            )
-                                                        }),
-                                                )
-                                        }
-                                        BrowserCompatibilityStatus::Unverified { evidence } => {
-                                            div()
-                                                .p_3()
-                                                .rounded_md()
-                                                .bg(theme.warning.opacity(0.12))
-                                                .border_1()
-                                                .border_color(theme.warning)
-                                                .child(
-                                                    v_flex()
-                                                        .gap_1()
-                                                        .child(
-                                                            h_flex()
-                                                                .gap_2()
-                                                                .items_center()
-                                                                .child(
-                                                                    div()
-                                                                        .font_weight(FontWeight::SEMIBOLD)
-                                                                        .text_xs()
-                                                                        .text_color(theme.warning)
-                                                                        .child("⚠ Status Dukungan: Ditemukan (Belum Diverifikasi)"),
-                                                                )
-                                                                .child(
-                                                                    div()
-                                                                        .text_xs()
-                                                                        .text_color(theme.muted_foreground)
-                                                                        .child(format!("{} [{}]", evidence.browser_name, evidence.architecture)),
-                                                                ),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .child(format!("Bukti: {}", evidence.evidence_text)),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child("ℹ Profil dengan browser ini tetap dapat disimpan untuk persiapan konfigurasi, namun gate aktivasi diblokir demi keamanan data perawat."),
-                            ),
-                                                )
-                                        }
-                                        BrowserCompatibilityStatus::Unavailable { path, reason } => {
-                                            div()
-                                                .p_3()
-                                                .rounded_md()
-                                                .bg(theme.danger.opacity(0.12))
-                                                .border_1()
-                                                .border_color(theme.danger)
-                                                .child(
-                                                    v_flex()
-                                                        .gap_1()
-                                                        .child(
-                                                            div()
-                                                                .font_weight(FontWeight::SEMIBOLD)
-                                                                .text_xs()
-                                                                .text_color(theme.danger)
-                                                                .child("✕ Status Dukungan: Executable Tidak Tersedia / Tidak Ditemukan"),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .text_xs()
-                                                                .child(format!("Kesalahan: {}", reason)),
-                                                        )
-                                                        .child(
+                                                                    .child(format!("{}{} [{}]", evidence.browser_name, version_text, evidence.architecture)),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .child(format!("Bukti: {}", evidence.evidence_text)),
+                                                    )
+                                                    .when(!limit_text.is_empty(), |this| {
+                                                        this.child(
                                                             div()
                                                                 .text_xs()
                                                                 .text_color(theme.muted_foreground)
-                                                                .child(format!("Jalur: {}", path.display())),
-                                                        ),
-                                                )
-                                        }
+                                                                .child(format!("Batasan: {}", limit_text)),
+                                                        )
+                                                    }),
+                                            )
+                                    }
+                                    Some(BrowserCompatibilityStatus::Unverified { evidence }) => {
+                                        let version_text = evidence
+                                            .version
+                                            .as_ref()
+                                            .map(|v| format!(" v{}", v))
+                                            .unwrap_or_default();
+                                        div()
+                                            .p_3()
+                                            .rounded_md()
+                                            .bg(theme.warning.opacity(0.12))
+                                            .border_1()
+                                            .border_color(theme.warning)
+                                            .child(
+                                                v_flex()
+                                                    .gap_1()
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_2()
+                                                            .items_center()
+                                                            .child(
+                                                                div()
+                                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                                    .text_xs()
+                                                                    .text_color(theme.warning)
+                                                                    .child("⚠ Status Dukungan: Ditemukan (Belum Diverifikasi)"),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(theme.muted_foreground)
+                                                                    .child(format!("{}{} [{}]", evidence.browser_name, version_text, evidence.architecture)),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .child(format!("Bukti: {}", evidence.evidence_text)),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(theme.muted_foreground)
+                                                            .child("ℹ Profil dengan browser ini tetap dapat disimpan untuk persiapan konfigurasi, namun gate aktivasi diblokir demi keamanan data perawat."),
+                                                    ),
+                                            )
+                                    }
+                                    Some(BrowserCompatibilityStatus::Unavailable { path, reason }) => {
+                                        div()
+                                            .p_3()
+                                            .rounded_md()
+                                            .bg(theme.danger.opacity(0.12))
+                                            .border_1()
+                                            .border_color(theme.danger)
+                                            .child(
+                                                v_flex()
+                                                    .gap_1()
+                                                    .child(
+                                                        div()
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                            .text_xs()
+                                                            .text_color(theme.danger)
+                                                            .child("✕ Status Dukungan: Executable Tidak Tersedia / Tidak Ditemukan"),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .child(format!("Kesalahan: {}", reason)),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(theme.muted_foreground)
+                                                            .child(format!("Jalur: {}", path.display())),
+                                                    ),
+                                            )
                                     }
                                 }
                             })

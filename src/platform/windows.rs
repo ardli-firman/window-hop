@@ -966,10 +966,11 @@ impl BrowserDetector for WindowsBrowserDetector {
                 let full_path = base.join(rel_path);
                 if full_path.exists() && full_path.is_file() {
                     let arch = read_executable_architecture(&full_path);
+                    let version = crate::browsers::read_installed_browser_version(&full_path);
                     candidates.push(DetectedBrowser {
                         name: name.to_string(),
                         executable_path: full_path,
-                        version: None,
+                        version,
                         architecture: arch,
                     });
                 }
@@ -998,7 +999,16 @@ impl BrowserDetector for WindowsBrowserDetector {
             }
         }"#;
 
-        if let Ok(output) = std::process::Command::new("powershell.exe")
+        #[cfg(windows)]
+        use std::os::windows::process::CommandExt;
+        #[cfg(windows)]
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+        let mut cmd = std::process::Command::new("powershell.exe");
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+
+        if let Ok(output) = cmd
             .arg("-NoProfile")
             .arg("-NonInteractive")
             .arg("-Command")
@@ -1016,6 +1026,7 @@ impl BrowserDetector for WindowsBrowserDetector {
                         let path = std::path::PathBuf::from(path_part.trim());
                         if path.exists() && path.is_file() {
                             let arch = read_executable_architecture(&path);
+                            let version = crate::browsers::read_installed_browser_version(&path);
                             let display_name = if name_part.trim().is_empty() {
                                 path.file_stem()
                                     .map(|s| s.to_string_lossy().to_string())
@@ -1026,7 +1037,7 @@ impl BrowserDetector for WindowsBrowserDetector {
                             candidates.push(DetectedBrowser {
                                 name: display_name,
                                 executable_path: path,
-                                version: None,
+                                version,
                                 architecture: arch,
                             });
                         }

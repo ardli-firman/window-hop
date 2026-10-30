@@ -497,7 +497,8 @@ impl LifecycleCoordinator {
         let path_str = path.to_string_lossy();
         let is_simulated_windows_path =
             cfg!(not(windows)) && (path_str.starts_with("C:") || path_str.starts_with("c:"));
-        if path.components().count() > 1 && !is_simulated_windows_path && !path.exists() {
+        let is_single_command = !path.is_absolute() && path.components().count() == 1;
+        if !is_simulated_windows_path && !is_single_command && !path.exists() {
             return Err(ApplicationError::BrowserExecutableNotFound(
                 path.to_path_buf(),
             ));

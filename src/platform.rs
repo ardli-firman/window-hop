@@ -1,6 +1,6 @@
 //! Platform abstraction boundaries for OS display, process lifecycle, and integration.
 
-use crate::browsers::{read_executable_architecture, LaunchPlan};
+use crate::browsers::LaunchPlan;
 pub use crate::browsers::{BrowserArchitecture, DetectedBrowser};
 use crate::domain::{MonitorDescriptor, ProcessId, ProfileId, TrayStatusSummary};
 use std::io::{BufRead, BufReader, Write};
@@ -1023,40 +1023,24 @@ pub fn deduplicate_detected_browsers(browsers: Vec<DetectedBrowser>) -> Vec<Dete
     result
 }
 
-/// Pendeteksi browser pengganti untuk platform non-Windows.
+#[cfg(not(windows))]
+/// Pendeteksi browser pengganti untuk platform non-Windows yang melaporkan kapabilitas tidak tersedia.
 #[derive(Debug, Default)]
 pub struct NonWindowsBrowserDetector;
 
+#[cfg(not(windows))]
 impl NonWindowsBrowserDetector {
     pub fn new() -> Self {
         Self
     }
 }
 
+#[cfg(not(windows))]
 impl BrowserDetector for NonWindowsBrowserDetector {
     fn detect_installed_browsers(&self) -> Result<Vec<DetectedBrowser>, PlatformError> {
-        let candidates = [
-            ("Microsoft Edge", "/usr/bin/microsoft-edge"),
-            ("Google Chrome", "/usr/bin/google-chrome"),
-            ("Mozilla Firefox", "/usr/bin/firefox"),
-            ("Brave Browser", "/usr/bin/brave-browser"),
-        ];
-
-        let mut detected = Vec::new();
-        for (name, path_str) in candidates {
-            let path = PathBuf::from(path_str);
-            if path.exists() {
-                let arch = read_executable_architecture(&path);
-                detected.push(DetectedBrowser {
-                    name: name.to_string(),
-                    executable_path: path,
-                    version: None,
-                    architecture: arch,
-                });
-            }
-        }
-
-        Ok(deduplicate_detected_browsers(detected))
+        Err(PlatformError::Unsupported(
+            "Deteksi browser terpasang native hanya tersedia pada platform Windows.".to_string(),
+        ))
     }
 }
 
