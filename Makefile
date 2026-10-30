@@ -42,7 +42,7 @@ DIST_DIR := dist
 ZIP_NAME := window-hop-v$(VERSION)-windows-x64.zip
 VERSION_TOOL := $(DEBUG_DIR)/version-tool$(EXE_EXT)
 
-.PHONY: all help dev build-dev release build-release installer package package-dev \
+.PHONY: all help run run-dev run-installer run-release dev build-dev release build-release installer package package-dev \
         test check fmt clean version version-full set-version bump-patch bump-minor bump-major tag
 
 all: help
@@ -50,6 +50,11 @@ all: help
 help:
 	@echo "Window Hop Build and Versioning Helper"
 	@echo "Current version: $(VERSION)"
+	@echo ""
+	@echo "Run targets (Development):"
+	@echo "  make run             Run Window Hop GUI application in dev mode (alias: make run-dev)"
+	@echo "  make run-installer   Run installer in dev mode (e.g. make run-installer ARGS=\"--help\")"
+	@echo "  make run-release     Run Window Hop application in release mode"
 	@echo ""
 	@echo "Build targets:"
 	@echo "  make dev             Build development executables (window-hop$(EXE_EXT), window-hop-installer$(EXE_EXT))"
@@ -75,7 +80,26 @@ help:
 	@echo "  make tag             Create git annotated tag for current version (v$(VERSION))"
 	@echo ""
 	@echo "Options:"
+	@echo "  ARGS=<flags>         Pass custom arguments (e.g. make run ARGS=\"--startup\")"
 	@echo "  TARGET=<triple>      Optional cross-compilation target (e.g. x86_64-pc-windows-msvc)"
+
+# ------------------------------------------------------------------------------
+# Run targets (Development)
+# ------------------------------------------------------------------------------
+
+run: run-dev
+
+run-dev:
+	@echo "==> Running Window Hop (profile: dev)..."
+	cargo run $(CARGO_TARGET_FLAG) --bin window-hop -- $(ARGS)
+
+run-installer:
+	@echo "==> Running Window Hop Installer (profile: dev)..."
+	cargo run $(CARGO_TARGET_FLAG) --bin window-hop-installer -- $(ARGS)
+
+run-release:
+	@echo "==> Running Window Hop (profile: release)..."
+	cargo run --release $(CARGO_TARGET_FLAG) --bin window-hop -- $(ARGS)
 
 # ------------------------------------------------------------------------------
 # Build targets

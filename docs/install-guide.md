@@ -79,6 +79,14 @@ Proyek menyediakan `Makefile` untuk mempermudah kompilasi installer dan aplikasi
 # Menampilkan bantuan dan daftar perintah build
 make help
 
+# Menjalankan aplikasi Window Hop mode pengembangan (dev)
+make run
+# atau dengan argumen khusus:
+make run ARGS="--startup"
+
+# Menjalankan installer dalam mode pengembangan
+make run-installer ARGS="--help"
+
 # Membangun executable dev (unoptimized + debuginfo)
 make dev
 
