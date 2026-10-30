@@ -7,6 +7,9 @@ use window_hop::platform::{
     parse_activation_flag, parse_silent_or_startup_flag, ActivationCommand,
     LocalSingleInstanceCoordinator, SingleInstanceCoordinator, TrayAction,
 };
+use window_hop::ui::tokens::{
+    WINDOW_INITIAL_HEIGHT, WINDOW_INITIAL_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+};
 use window_hop::ui::WindowHopView;
 
 enum AppEvent {
@@ -36,9 +39,10 @@ fn open_or_focus_settings(
         }),
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
-            size(px(900.0), px(600.0)),
+            size(WINDOW_INITIAL_WIDTH, WINDOW_INITIAL_HEIGHT),
             cx,
         ))),
+        window_min_size: Some(size(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)),
         app_owns_titlebar_drag: true,
         ..Default::default()
     };
