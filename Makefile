@@ -3,13 +3,13 @@
 # ==============================================================================
 # Commands for building development executables, release packages, installer .exe,
 # running quality checks, and managing project versioning.
+# Requires only Cargo and Rust toolchain (no Python required).
 # ==============================================================================
 
 SHELL := /bin/bash
-PYTHON := python3
 
-# Extract current project version
-VERSION ?= $(shell $(PYTHON) scripts/version.py get 2>/dev/null || sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+# Extract current project version directly from Cargo.toml (pure shell, instant)
+VERSION ?= $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
 
 # Target triple configuration (e.g. x86_64-pc-windows-msvc or empty for host)
 TARGET ?=
@@ -40,6 +40,7 @@ endif
 
 DIST_DIR := dist
 ZIP_NAME := window-hop-v$(VERSION)-windows-x64.zip
+VERSION_TOOL := $(DEBUG_DIR)/version-tool$(EXE_EXT)
 
 .PHONY: all help dev build-dev release build-release installer package package-dev \
         test check fmt clean version version-full set-version bump-patch bump-minor bump-major tag
@@ -64,7 +65,7 @@ help:
 	@echo "  make fmt             Format code using cargo fmt"
 	@echo "  make clean           Clean build artifacts and $(DIST_DIR)/"
 	@echo ""
-	@echo "Versioning targets:"
+	@echo "Versioning targets (powered by pure Rust / Node helper):"
 	@echo "  make version         Print current version"
 	@echo "  make version-full    Print current version with git commit hash"
 	@echo "  make set-version VERSION=x.y.z  Update version in Cargo.toml and Cargo.lock"
@@ -176,33 +177,37 @@ fmt:
 clean:
 	@echo "==> Cleaning build artifacts..."
 	cargo clean
-	@$(PYTHON) -c "import shutil, os; os.path.exists('$(DIST_DIR)') and shutil.rmtree('$(DIST_DIR)')"
+	@rm -rf $(DIST_DIR)
 	@echo "Clean completed."
 
 # ------------------------------------------------------------------------------
-# Versioning
+# Versioning Helper (Rust & Node)
 # ------------------------------------------------------------------------------
 
+$(VERSION_TOOL): scripts/version.rs
+	@mkdir -p $(DEBUG_DIR)
+	@rustc -O scripts/version.rs -o $(VERSION_TOOL)
+
 version:
-	@$(PYTHON) scripts/version.py get
+	@echo $(VERSION)
 
-version-full:
-	@$(PYTHON) scripts/version.py full
+version-full: $(VERSION_TOOL)
+	@$(VERSION_TOOL) full
 
-set-version:
+set-version: $(VERSION_TOOL)
 ifndef VERSION
 	$(error VERSION is not set. Usage: make set-version VERSION=x.y.z)
 endif
-	@$(PYTHON) scripts/version.py set $(VERSION)
+	@$(VERSION_TOOL) set $(VERSION)
 
-bump-patch:
-	@$(PYTHON) scripts/version.py bump patch
+bump-patch: $(VERSION_TOOL)
+	@$(VERSION_TOOL) bump patch
 
-bump-minor:
-	@$(PYTHON) scripts/version.py bump minor
+bump-minor: $(VERSION_TOOL)
+	@$(VERSION_TOOL) bump minor
 
-bump-major:
-	@$(PYTHON) scripts/version.py bump major
+bump-major: $(VERSION_TOOL)
+	@$(VERSION_TOOL) bump major
 
 tag:
 	@echo "==> Creating Git tag v$(VERSION)..."

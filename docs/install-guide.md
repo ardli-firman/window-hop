@@ -101,7 +101,7 @@ make check
 
 ### Manajemen Versi (Versioning)
 
-Nomor versi dikelola secara konsisten mengikuti Semantic Versioning (SemVer) dan disinkronkan ke `Cargo.toml`, manifest instalasi, serta metadata biner:
+Nomor versi dikelola secara konsisten mengikuti Semantic Versioning (SemVer) dan disinkronkan ke `Cargo.toml`, manifest instalasi, serta metadata biner. Tooling versioning dibangun dengan pure Rust (`scripts/version.rs`, otomatis dikompilasi via `rustc`) dan alternatif Node.js (`scripts/version.js`), sehingga tidak memerlukan Python:
 
 ```bash
 # Melihat versi aktif saat ini
