@@ -68,3 +68,65 @@ Jika workstation memerlukan instalasi di lokasi lain (misal drive D:):
   Installer akan menolak dengan rincian nomor build OS yang ditemukan dan batas minimum (Windows 10 build 19041).
 - **Pemeriksaan Integritas Berkas**:
   Integritas instalasi dapat diverifikasi sewaktu-waktu melalui `install-manifest.json`.
+
+## 6. Build Otomatis, Makefile, dan GitHub Actions
+
+### Kompilasi Lokal dengan Makefile
+
+Proyek menyediakan `Makefile` untuk mempermudah kompilasi installer dan aplikasi baik dalam mode pengembangan (*dev*) maupun produksi (*release*):
+
+```bash
+# Menampilkan bantuan dan daftar perintah build
+make help
+
+# Membangun executable dev (unoptimized + debuginfo)
+make dev
+
+# Membangun executable installer saja (dev)
+make dev-installer
+
+# Membangun executable release (teroptimasi)
+make release
+
+# Membangun executable installer saja (release)
+make installer
+
+# Membuat paket distribusi di folder dist/ beserta arsip .zip
+make package
+
+# Menjalankan seluruh pengujian dan pengecekan kualitas
+make test
+make check
+```
+
+### Manajemen Versi (Versioning)
+
+Nomor versi dikelola secara konsisten mengikuti Semantic Versioning (SemVer) dan disinkronkan ke `Cargo.toml`, manifest instalasi, serta metadata biner:
+
+```bash
+# Melihat versi aktif saat ini
+make version
+
+# Melihat versi aktif beserta hash commit git
+make version-full
+
+# Mengubah versi ke nilai spesifik
+make set-version VERSION=0.2.0
+
+# Menaikkan versi otomatis (patch: 0.1.0 -> 0.1.1, minor: 0.1.0 -> 0.2.0, major: 0.1.0 -> 1.0.0)
+make bump-patch
+make bump-minor
+make bump-major
+
+# Membuat tag Git beranotasi sesuai versi aktif
+make tag
+```
+
+### Integrasi CI/CD GitHub Actions
+
+Alur kerja GitHub Actions (`.github/workflows/build-installer.yml`) berjalan otomatis untuk:
+1. Menjalankan linter (`cargo fmt`, `cargo clippy -D warnings`) dan pengujian (`cargo test`) pada Linux.
+2. Membangun executable `window-hop.exe` dan `window-hop-installer.exe` menggunakan `make` pada runner Windows (`windows-latest`, target `x86_64-pc-windows-msvc`).
+3. Menguji eksekusi `window-hop-installer.exe --help` langsung pada lingkungan Windows runner.
+4. Menghasilkan checksum SHA-256 dan mengunggah artefak build yang siap diunduh.
+5. Saat push tag `v*` (contoh: `v0.1.0`), alur kerja otomatis membuat GitHub Release dan melampirkan berkas installer `.exe` serta paket `.zip`.

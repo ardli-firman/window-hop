@@ -1,0 +1,170 @@
+name: Build Installer & Release
+
+'on':
+  push:
+    branches: [main]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build profile (release or dev)'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - dev
+      create_release:
+        description: 'Create GitHub Release and attach installer assets'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  check-and-test:
+    name: Lint & Test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify Version Consistency
+        run: |
+          make version
+          make version-full
+
+      - name: Run Tests via Makefile
+        run: make test
+
+      - name: Run Quality Checks via Makefile
+        run: make check
+
+  build-installer-windows:
+    name: Build Windows Installer .exe
+    runs-on: windows-latest
+    needs: [check-and-test]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Rust toolchain (Windows MSVC x64)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install GNU Make
+        run: choco install make --no-progress -y
+
+      - name: Resolve Version
+        id: ver
+        shell: bash
+        run: |
+          CURRENT_VER=$(make version)
+          GIT_FULL=$(make version-full)
+          echo "Current version from Cargo.toml: $CURRENT_VER"
+          echo "Full version: $GIT_FULL"
+
+          # Synchronize version if triggered by git tag v*
+          if [[ "${{ github.ref }}" =~ ^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+.*) ]]; then
+            TAG_VER="${BASH_REMATCH[1]}"
+            echo "Tag detected: v$TAG_VER"
+            if [[ "$CURRENT_VER" != "$TAG_VER" ]]; then
+              echo "Synchronizing version in Cargo.toml to match tag $TAG_VER..."
+              make set-version VERSION="$TAG_VER"
+              CURRENT_VER="$TAG_VER"
+            fi
+          fi
+
+          echo "version=$CURRENT_VER" >> "$GITHUB_OUTPUT"
+          echo "full_version=$GIT_FULL" >> "$GITHUB_OUTPUT"
+
+      - name: Build Dev Executables via Makefile
+        if: ${{ github.event.inputs.build_type == 'dev' && !startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: make dev
+
+      - name: Build Release Executables via Makefile
+        if: ${{ github.event.inputs.build_type != 'dev' || startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: make release
+
+      - name: Package Installer and Binaries via Makefile
+        shell: bash
+        run: |
+          if [[ "${{ github.event.inputs.build_type }}" == "dev" && ! "${{ startsWith(github.ref, 'refs/tags/v') }}" == "true" ]]; then
+            make package-dev
+          else
+            make package
+          fi
+
+      - name: Verify Installer Executable
+        shell: bash
+        run: |
+          echo "Verifying window-hop-installer.exe execution on Windows..."
+          ./dist/window-hop-installer.exe --help
+
+      - name: Generate Checksums
+        shell: bash
+        run: |
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum window-hop.exe window-hop-installer.exe *.zip > SHA256SUMS.txt
+          else
+            powershell.exe -Command "Get-ChildItem -File | Get-FileHash -Algorithm SHA256 | ForEach-Object { '{0}  {1}' -f \$_.Hash.ToLower(), \$_.Path.Split('\\')[-1] }" > SHA256SUMS.txt
+          fi
+          echo "=== SHA256 Checksums ==="
+          cat SHA256SUMS.txt
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: window-hop-v${{ steps.ver.outputs.version }}-windows-x64
+          path: |
+            dist/window-hop.exe
+            dist/window-hop-installer.exe
+            dist/INSTALL-GUIDE.txt
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == true
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Window Hop v${{ steps.ver.outputs.version }}"
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: |
+            dist/window-hop.exe
+            dist/window-hop-installer.exe
+            dist/INSTALL-GUIDE.txt
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
