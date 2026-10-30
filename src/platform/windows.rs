@@ -4,7 +4,7 @@ use crate::browsers::LaunchPlan;
 use crate::domain::{MonitorDescriptor, MonitorIdentity, ProcessId, TrayStatusSummary};
 use crate::platform::{
     ManagedProcess, MonitorProvider, PlatformError, ProcessLauncher, ShortcutCreator, ShortcutSpec,
-    TrayAction, TrayActionHandler, TrayProvider,
+    StartupManager, TrayAction, TrayActionHandler, TrayProvider,
 };
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -782,5 +782,97 @@ impl TrayProvider for WindowsTrayProvider {
 impl Drop for WindowsTrayProvider {
     fn drop(&mut self) {
         let _ = self.remove_tray();
+    }
+}
+
+/// Implementasi StartupManager untuk platform Windows menggunakan registry Run key.
+pub struct WindowsStartupManager;
+
+impl WindowsStartupManager {
+    /// Membuat instance baru WindowsStartupManager.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for WindowsStartupManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StartupManager for WindowsStartupManager {
+    fn is_startup_registered(&self) -> Result<bool, PlatformError> {
+        let ps_script = r#"& { param($name) $p = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $name -ErrorAction SilentlyContinue; if ($p -and $p.$name) { exit 0 } else { exit 1 } }"#;
+
+        let output = std::process::Command::new("powershell.exe")
+            .arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-Command")
+            .arg(ps_script)
+            .arg("WindowHop")
+            .output()
+            .map_err(|e| {
+                PlatformError::Os(format!(
+                    "Gagal memeriksa status pendaftaran startup Windows: {}",
+                    e
+                ))
+            })?;
+
+        Ok(output.status.success())
+    }
+
+    fn set_startup_registered(&self, enabled: bool) -> Result<(), PlatformError> {
+        if enabled {
+            let app_exe = std::env::current_exe().map_err(|e| {
+                PlatformError::Os(format!("Gagal mendapatkan path executable aplikasi: {}", e))
+            })?;
+            let val = format!("\"{}\" --startup", app_exe.to_string_lossy());
+
+            let ps_script = r#"& { param($name, $val) Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $name -Value $val }"#;
+
+            let output = std::process::Command::new("powershell.exe")
+                .arg("-NoProfile")
+                .arg("-NonInteractive")
+                .arg("-Command")
+                .arg(ps_script)
+                .arg("WindowHop")
+                .arg(&val)
+                .output()
+                .map_err(|e| {
+                    PlatformError::Os(format!("Gagal mendaftarkan startup Windows: {}", e))
+                })?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(PlatformError::Os(format!(
+                    "Gagal mengatur registry startup Windows: {}",
+                    stderr.trim()
+                )));
+            }
+        } else {
+            let ps_script = r#"& { param($name) Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $name -ErrorAction SilentlyContinue }"#;
+
+            let output = std::process::Command::new("powershell.exe")
+                .arg("-NoProfile")
+                .arg("-NonInteractive")
+                .arg("-Command")
+                .arg(ps_script)
+                .arg("WindowHop")
+                .output()
+                .map_err(|e| {
+                    PlatformError::Os(format!("Gagal mencabut pendaftaran startup Windows: {}", e))
+                })?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(PlatformError::Os(format!(
+                    "Gagal menghapus registry startup Windows: {}",
+                    stderr.trim()
+                )));
+            }
+        }
+
+        Ok(())
     }
 }

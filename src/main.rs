@@ -67,8 +67,9 @@ fn main() {
         }
     } else if is_silent_or_startup {
         // Jika dipanggil silent/startup dan sudah ada instance primer yang berjalan di tray,
-        // kirim Ping untuk memeriksa dan keluar segera agar tidak membuat instance ganda
-        if let Ok(true) = ipc.send_activation(&ActivationCommand::Ping) {
+        // kirim Startup agar instance primer mengaktifkan profil startup jika belum aktif,
+        // lalu keluar segera agar tidak membuat instance ganda
+        if let Ok(true) = ipc.send_activation(&ActivationCommand::Startup) {
             return;
         }
     } else {
@@ -102,6 +103,11 @@ fn main() {
             ActivationCommand::ActivateProfile(pid) => {
                 if let Ok(mut coord) = coord_for_ipc.lock() {
                     let _ = coord.handle_shortcut_activation(&pid);
+                }
+            }
+            ActivationCommand::Startup => {
+                if let Ok(mut coord) = coord_for_ipc.lock() {
+                    let _ = coord.handle_startup_activation();
                 }
             }
             ActivationCommand::OpenSettings => {
@@ -177,6 +183,13 @@ fn main() {
         if let Some(ref profile_id) = activate_profile_id {
             if let Ok(mut coord) = coordinator_arc.lock() {
                 let _ = coord.handle_shortcut_activation(profile_id);
+            }
+        }
+
+        // Jika dimulai dengan flag startup/silent/tray, jalankan aktivasi profil startup di latar belakang
+        if is_silent_or_startup {
+            if let Ok(mut coord) = coordinator_arc.lock() {
+                let _ = coord.handle_startup_activation();
             }
         }
 

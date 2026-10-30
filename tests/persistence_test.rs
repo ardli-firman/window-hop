@@ -145,3 +145,30 @@ fn test_file_profile_store_rejects_unsupported_schema_version() {
         err => panic!("expected UnsupportedSchemaVersion error, got: {:?}", err),
     }
 }
+
+#[test]
+fn test_file_profile_store_saves_and_loads_startup_settings() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let file_path = dir.path().join("profiles_startup.json");
+    let store = FileProfileStore::new(&file_path);
+
+    let profile = Profile::new_draft(
+        ProfileId::new("p-startup-test"),
+        "Antrian Poli Gigi",
+        PathBuf::from(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+        "--app=https://antrian.gigi.local --kiosk",
+    );
+
+    let config =
+        AppConfig::with_startup(1, vec![profile.clone()], true, Some(profile.id().clone()));
+
+    store
+        .save(&config)
+        .expect("save config with startup settings");
+
+    let loaded = store.load().expect("load config with startup settings");
+    assert_eq!(loaded.schema_version(), 1);
+    assert_eq!(loaded.profiles().len(), 1);
+    assert!(loaded.startup_enabled());
+    assert_eq!(loaded.startup_profile_id(), Some(profile.id()));
+}
