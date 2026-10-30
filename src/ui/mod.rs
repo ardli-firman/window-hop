@@ -24,12 +24,12 @@ use crate::domain::{
     ProfileLifecycleState,
 };
 
-pub mod action_bar;
-pub mod browser_picker;
-pub mod dialogs;
-pub mod form;
-pub mod monitor_card;
-pub mod sidebar;
+pub(crate) mod action_bar;
+pub(crate) mod browser_picker;
+pub(crate) mod dialogs;
+pub(crate) mod form;
+pub(crate) mod monitor_card;
+pub(crate) mod sidebar;
 pub mod tokens;
 
 pub use tokens::*;
@@ -367,6 +367,7 @@ impl WindowHopView {
 impl Render for WindowHopView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        let shadcn = ShadcnTokens::for_theme(&theme);
         // Non-blocking try_lock: jangan memblokir render loop GPUI jika koordinator sedang di-lock oleh task background
         let coordinator_arc = self.coordinator.clone();
         if let Ok(coord) = coordinator_arc.try_lock() {
@@ -375,8 +376,8 @@ impl Render for WindowHopView {
 
         v_flex()
             .size_full()
-            .bg(theme.background)
-            .text_color(theme.foreground)
+            .bg(shadcn.background)
+            .text_color(shadcn.foreground)
             .child(
                 TitleBar::new().child(
                     h_flex()
@@ -432,9 +433,9 @@ impl Render for WindowHopView {
                             .flex_1()
                             .gap_6()
                             // Kolom Kiri: Master Sidebar
-                            .child(self.render_sidebar(cx))
+                            .child(self.render_sidebar(&shadcn, cx))
                             // Kolom Kanan: Detail Form Panel
-                            .child(self.render_form(cx))
+                            .child(self.render_form(&shadcn, cx))
                     ),
             )
     }

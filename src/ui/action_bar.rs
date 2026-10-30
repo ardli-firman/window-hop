@@ -8,9 +8,6 @@ use gpui_kit::*;
 use crate::application::{ActivationResult, StopOutcome};
 use crate::ui::WindowHopView;
 
-/// Marker type identifying the action_bar submodule.
-pub struct ActionBarMarker;
-
 impl WindowHopView {
     /// Renders the action buttons at the bottom of the profile detail form.
     pub(crate) fn render_action_bar(&self, cx: &Context<Self>) -> impl IntoElement {

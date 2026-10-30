@@ -6,15 +6,16 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::domain::{ExitReason, ProfileId, ProfileLifecycleState, ProfileStatus};
-use crate::ui::tokens::SIDEBAR_WIDTH;
+use crate::ui::tokens::{ShadcnTokens, SIDEBAR_WIDTH};
 use crate::ui::WindowHopView;
-
-/// Marker type identifying the sidebar submodule.
-pub struct SidebarMarker;
 
 impl WindowHopView {
     /// Renders the master navigation sidebar (fixed 320 px).
-    pub(crate) fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_sidebar(
+        &self,
+        shadcn: &ShadcnTokens,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme().clone();
         let profiles = self.cached_profiles.clone();
         let selected_id = self.selected_profile_id.clone();
@@ -27,7 +28,9 @@ impl WindowHopView {
             .p_4()
             .rounded_lg()
             .border_1()
-            .border_color(theme.border)
+            .border_color(shadcn.border)
+            .bg(shadcn.card)
+            .text_color(shadcn.card_foreground)
             .child(
                 h_flex()
                     .justify_between()
@@ -50,7 +53,7 @@ impl WindowHopView {
                 div()
                     .p_4()
                     .text_sm()
-                    .text_color(theme.muted_foreground)
+                    .text_color(shadcn.muted_foreground)
                     .child("Belum ada profil. Klik '+ Profil Baru' untuk membuat.")
                     .into_any_element()
             } else {
@@ -67,14 +70,14 @@ impl WindowHopView {
                             .unwrap_or(ProfileLifecycleState::Idle);
 
                         let bg = if is_selected {
-                            theme.accent.opacity(0.3)
+                            shadcn.accent.opacity(0.3)
                         } else {
-                            theme.muted.opacity(0.4)
+                            shadcn.muted.opacity(0.4)
                         };
                         let border = if is_selected {
-                            theme.primary
+                            shadcn.primary
                         } else {
-                            theme.border
+                            shadcn.border
                         };
                         let item_id = SharedString::from(format!("profile-item-{}", pid));
 
@@ -88,10 +91,10 @@ impl WindowHopView {
                             }
                             ProfileLifecycleState::Exited { reason } => match reason {
                                 ExitReason::Crash => ("Crash", theme.danger),
-                                ExitReason::ManualClose => ("Berhenti", theme.muted_foreground),
+                                ExitReason::ManualClose => ("Berhenti", shadcn.muted_foreground),
                             },
                             ProfileLifecycleState::Idle => match p_status {
-                                ProfileStatus::DraftNotReady => ("Draft", theme.muted_foreground),
+                                ProfileStatus::DraftNotReady => ("Draft", shadcn.muted_foreground),
                                 ProfileStatus::Ready => ("Siap", theme.primary),
                                 ProfileStatus::TargetUnavailable => {
                                     ("Tidak Tersedia", theme.warning)
@@ -155,7 +158,7 @@ impl WindowHopView {
                                                     .px_2()
                                                     .py_0p5()
                                                     .rounded_sm()
-                                                    .bg(theme.muted)
+                                                    .bg(shadcn.muted)
                                                     .text_color(status_color)
                                                     .child(status_text),
                                             ),
@@ -163,11 +166,11 @@ impl WindowHopView {
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(theme.muted_foreground)
+                                            .text_color(shadcn.muted_foreground)
                                             .child(p.browser_path().to_string_lossy().to_string()),
                                     )
                                     .child(
-                                        div().text_xs().text_color(theme.muted_foreground).child(
+                                        div().text_xs().text_color(shadcn.muted_foreground).child(
                                             match p.target_monitor() {
                                                 Some(m) => format!("Monitor: {}", m),
                                                 None => "Monitor: (Belum Dipilih)".to_string(),
@@ -184,8 +187,8 @@ impl WindowHopView {
                     .p_3()
                     .rounded_md()
                     .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.muted.opacity(0.3))
+                    .border_color(shadcn.border)
+                    .bg(shadcn.muted.opacity(0.3))
                     .gap_2()
                     .child(
                         h_flex()
@@ -206,7 +209,7 @@ impl WindowHopView {
                                             .text_color(if self.cached_startup_enabled {
                                                 theme.primary
                                             } else {
-                                                theme.muted_foreground
+                                                shadcn.muted_foreground
                                             })
                                             .child(if self.cached_startup_enabled {
                                                 "Status: Aktif di Tray"
@@ -228,7 +231,7 @@ impl WindowHopView {
                                     })),
                             ),
                     )
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(
+                    .child(div().text_xs().text_color(shadcn.muted_foreground).child(
                         match &self.cached_startup_profile_id {
                             Some(pid) => {
                                 let name = self

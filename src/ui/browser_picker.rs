@@ -11,9 +11,6 @@ use gpui_kit::*;
 use crate::browsers::{BrowserCompatibilityStatus, DetectedBrowser};
 use crate::ui::WindowHopView;
 
-/// Marker type identifying the browser_picker submodule.
-pub struct BrowserPickerMarker;
-
 impl WindowHopView {
     /// Renders the detected browser selection list, manual executable path input, and compatibility status card.
     pub(crate) fn render_browser_picker(&mut self, cx: &Context<Self>) -> impl IntoElement {

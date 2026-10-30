@@ -8,9 +8,6 @@ use gpui_kit::*;
 use crate::domain::TargetMonitorStatus;
 use crate::ui::WindowHopView;
 
-/// Marker type identifying the monitor_card submodule.
-pub struct MonitorCardMarker;
-
 impl WindowHopView {
     /// Renders the target monitor selection options and readiness status card.
     pub(crate) fn render_monitor_card(&self, cx: &Context<Self>) -> impl IntoElement {

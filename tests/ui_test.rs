@@ -2,7 +2,8 @@
 
 use gpui_kit::px;
 use window_hop::ui::tokens::{
-    SIDEBAR_WIDTH, WINDOW_INITIAL_HEIGHT, WINDOW_INITIAL_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+    ShadcnTokens, SIDEBAR_WIDTH, WINDOW_INITIAL_HEIGHT, WINDOW_INITIAL_WIDTH, WINDOW_MIN_HEIGHT,
+    WINDOW_MIN_WIDTH,
 };
 use window_hop::ui::WindowHopView;
 
@@ -20,13 +21,17 @@ fn test_sidebar_fixed_width_matches_shadcn_master_detail_spec() {
 }
 
 #[test]
-fn test_ui_submodules_are_accessible_and_modular() {
-    // Verify that the requested submodules are exposed under window_hop::ui
-    let _ = std::any::type_name::<window_hop::ui::sidebar::SidebarMarker>();
-    let _ = std::any::type_name::<window_hop::ui::form::FormMarker>();
-    let _ = std::any::type_name::<window_hop::ui::monitor_card::MonitorCardMarker>();
-    let _ = std::any::type_name::<window_hop::ui::browser_picker::BrowserPickerMarker>();
-    let _ = std::any::type_name::<window_hop::ui::action_bar::ActionBarMarker>();
-    let _ = std::any::type_name::<window_hop::ui::dialogs::DialogsMarker>();
+fn test_shadcn_zinc_and_slate_theme_tokens_are_valid() {
+    let zinc_light = ShadcnTokens::zinc_light();
+    let zinc_dark = ShadcnTokens::zinc_dark();
+    assert_ne!(zinc_light.background, zinc_dark.background);
+    assert_ne!(zinc_light.border, zinc_dark.border);
+
+    let slate_light = ShadcnTokens::slate_light();
+    let slate_dark = ShadcnTokens::slate_dark();
+    assert_ne!(slate_light.background, slate_dark.background);
+    assert_ne!(slate_light.border, slate_dark.border);
+
+    // Verify WindowHopView type is publicly available
     let _ = std::any::type_name::<WindowHopView>();
 }

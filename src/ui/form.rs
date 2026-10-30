@@ -8,14 +8,16 @@ use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use crate::ui::tokens::ShadcnTokens;
 use crate::ui::WindowHopView;
-
-/// Marker type identifying the form submodule.
-pub struct FormMarker;
 
 impl WindowHopView {
     /// Renders the profile detail form panel (flex-1).
-    pub(crate) fn render_form(&mut self, cx: &Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_form(
+        &mut self,
+        shadcn: &ShadcnTokens,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme().clone();
         let selected_id = self.selected_profile_id.clone();
         let is_busy = self.is_busy;
@@ -26,7 +28,9 @@ impl WindowHopView {
             .p_4()
             .rounded_lg()
             .border_1()
-            .border_color(theme.border)
+            .border_color(shadcn.border)
+            .bg(shadcn.card)
+            .text_color(shadcn.card_foreground)
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
@@ -179,13 +183,13 @@ impl WindowHopView {
                         .bg(if is_this_startup {
                             theme.warning.opacity(0.12)
                         } else {
-                            theme.muted.opacity(0.2)
+                            shadcn.muted.opacity(0.2)
                         })
                         .border_1()
                         .border_color(if is_this_startup {
                             theme.warning
                         } else {
-                            theme.border
+                            shadcn.border
                         })
                         .child(
                             v_flex()
@@ -202,7 +206,7 @@ impl WindowHopView {
                                         .text_color(if is_this_startup {
                                             theme.warning
                                         } else {
-                                            theme.muted_foreground
+                                            shadcn.muted_foreground
                                         })
                                         .child(if is_this_startup {
                                             "★ Profil ini dipilih untuk berjalan otomatis setelah login Windows"

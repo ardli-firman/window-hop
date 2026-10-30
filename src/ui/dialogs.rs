@@ -8,9 +8,6 @@ use crate::application::StopOutcome;
 use crate::domain::{ProfileId, ProfileLifecycleState};
 use crate::ui::WindowHopView;
 
-/// Marker type identifying the dialogs submodule.
-pub struct DialogsMarker;
-
 impl WindowHopView {
     /// Renders the top notification / status banner if a message is present.
     pub(crate) fn render_status_banner(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
