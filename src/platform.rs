@@ -806,6 +806,9 @@ pub trait StartupManager: Send + Sync {
     /// Jika `enabled` bernilai true, aplikasi didaftarkan dengan flag `--startup`.
     /// Jika `enabled` bernilai false, pendaftaran dicabut.
     fn set_startup_registered(&self, enabled: bool) -> Result<(), PlatformError>;
+
+    /// Mengatur path executable aplikasi yang digunakan untuk pendaftaran startup OS.
+    fn set_app_executable(&self, _app_exe: PathBuf) {}
 }
 
 /// Implementasi tiruan (mock) dari StartupManager untuk pengujian unit deterministik.
@@ -863,15 +866,21 @@ impl StartupManager for MockStartupManager {
         }
         self.is_registered.store(enabled, Ordering::SeqCst);
         if enabled {
-            let exe =
-                self.app_exe.lock().unwrap().clone().unwrap_or_else(|| {
-                    crate::installer::resolve_installed_app_executable(None, None)
-                });
+            let exe = self
+                .app_exe
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("window-hop.exe"));
             *self.registered_exe.lock().unwrap() = Some(exe);
         } else {
             *self.registered_exe.lock().unwrap() = None;
         }
         Ok(())
+    }
+
+    fn set_app_executable(&self, app_exe: PathBuf) {
+        *self.app_exe.lock().unwrap() = Some(app_exe);
     }
 }
 

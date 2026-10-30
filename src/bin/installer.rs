@@ -2,12 +2,12 @@
 //!
 //! Provides automated and interactive installation of Window Hop to a consistent
 //! application directory (%LOCALAPPDATA%\Programs\Window Hop on Windows), bundling
-//! GPUI dependencies and runtime guidance, and setting up Start Menu shortcuts.
+//! GPUI dependencies and runtime guidance.
 
 use std::env;
 use std::path::PathBuf;
 use window_hop::installer::{
-    default_install_dir, install, uninstall, validate_os_baseline, Arch, InstallOptions, OsVersion,
+    default_install_dir, install, validate_os_baseline, InstallError, InstallOptions, OsVersion,
 };
 
 fn print_help() {
@@ -19,14 +19,13 @@ fn print_help() {
             -d, --dir <PATH>       Tentukan direktori tujuan instalasi khusus\n                           \
                                    (default: %LOCALAPPDATA%\\Programs\\Window Hop)\n    \
             -s, --source <PATH>    Tentukan path berkas executable window-hop.exe sumber\n    \
-            -u, --uninstall        Copot instalasi Window Hop dari direktori target\n    \
             -q, --silent           Mode senyap (tanpa konfirmasi interaktif)\n    \
             -h, --help             Tampilkan bantuan ini\n",
         env!("CARGO_PKG_VERSION")
     );
 }
 
-fn detect_current_os() -> OsVersion {
+fn detect_current_os() -> Result<OsVersion, InstallError> {
     #[cfg(windows)]
     {
         // Deteksi arsitektur via environment PROCESSOR_ARCHITECTURE
@@ -37,57 +36,74 @@ fn detect_current_os() -> OsVersion {
             _ => Arch::Other,
         };
 
-        // Mengambil versi Windows via powershell atau environment
-        let (major, minor, build) = get_windows_version();
-        OsVersion {
+        // Mengambil versi Windows via powershell
+        let (major, minor, build) = get_windows_version()?;
+        Ok(OsVersion {
             major,
             minor,
             build,
             arch,
-        }
+        })
     }
 
     #[cfg(not(windows))]
     {
-        // Lingkungan pengujian / cross-platform
-        OsVersion {
-            major: 10,
-            minor: 0,
-            build: 19045,
-            arch: Arch::X64,
-        }
+        Err(InstallError::UnsupportedPlatform(
+            "Installer executable native Window Hop hanya dapat dijalankan pada platform Windows 10/11 x64."
+                .to_string(),
+        ))
     }
 }
 
 #[cfg(windows)]
-fn get_windows_version() -> (u32, u32, u32) {
+fn get_windows_version() -> Result<(u32, u32, u32), InstallError> {
     let script = "& { [System.Environment]::OSVersion.Version.ToString() }";
-    if let Ok(output) = std::process::Command::new("powershell.exe")
+    let output = std::process::Command::new("powershell.exe")
         .arg("-NoProfile")
         .arg("-NonInteractive")
         .arg("-Command")
         .arg(script)
         .output()
-    {
-        if output.status.success() {
-            let s = String::from_utf8_lossy(&output.stdout);
-            let parts: Vec<&str> = s.trim().split('.').collect();
-            if parts.len() >= 3 {
-                let major = parts[0].parse().unwrap_or(10);
-                let minor = parts[1].parse().unwrap_or(0);
-                let build = parts[2].parse().unwrap_or(19045);
-                return (major, minor, build);
-            }
-        }
+        .map_err(|e| {
+            InstallError::VerificationFailed(format!(
+                "Gagal menjalankan powershell untuk verifikasi versi Windows: {}",
+                e
+            ))
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(InstallError::VerificationFailed(format!(
+            "Pemeriksaan versi Windows gagal: {}",
+            stderr.trim()
+        )));
     }
-    (10, 0, 19045)
+
+    let s = String::from_utf8_lossy(&output.stdout);
+    let parts: Vec<&str> = s.trim().split('.').collect();
+    if parts.len() >= 3 {
+        let major = parts[0].parse().map_err(|e| {
+            InstallError::VerificationFailed(format!("Gagal mem-parsing nomor major OS: {}", e))
+        })?;
+        let minor = parts[1].parse().map_err(|e| {
+            InstallError::VerificationFailed(format!("Gagal mem-parsing nomor minor OS: {}", e))
+        })?;
+        let build = parts[2].parse().map_err(|e| {
+            InstallError::VerificationFailed(format!("Gagal mem-parsing nomor build OS: {}", e))
+        })?;
+        return Ok((major, minor, build));
+    }
+
+    Err(InstallError::VerificationFailed(format!(
+        "Format versi OS tidak terduga: {}",
+        s.trim()
+    )))
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
     let mut custom_dir = None;
     let mut custom_source = None;
-    let mut is_uninstall = false;
     let mut _is_silent = false;
 
     let mut i = 1;
@@ -96,9 +112,6 @@ fn main() {
             "-h" | "--help" => {
                 print_help();
                 return;
-            }
-            "-u" | "--uninstall" => {
-                is_uninstall = true;
             }
             "-q" | "--silent" => {
                 _is_silent = true;
@@ -126,28 +139,15 @@ fn main() {
 
     let install_dir = custom_dir.unwrap_or_else(default_install_dir);
 
-    if is_uninstall {
-        println!(
-            "Mencopot instalasi Window Hop dari: {}",
-            install_dir.display()
-        );
-        match uninstall(&install_dir) {
-            Ok(receipt) => {
-                println!(
-                    "Berhasil mencopot {} berkas Window Hop.",
-                    receipt.uninstalled_files.len()
-                );
-                std::process::exit(0);
-            }
-            Err(e) => {
-                eprintln!("Gagal mencopot instalasi: {}", e);
-                std::process::exit(1);
-            }
-        }
-    }
-
     // 1. Validasi baseline sistem operasi
-    let os_version = detect_current_os();
+    let os_version = match detect_current_os() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Pemeriksaan baseline sistem operasi gagal:\n  {}", e);
+            std::process::exit(1);
+        }
+    };
+
     if let Err(e) = validate_os_baseline(&os_version) {
         eprintln!("Pemeriksaan baseline sistem operasi gagal:\n  {}", e);
         eprintln!("\nWindow Hop memerlukan Windows 10 x64 (build 19041+) atau Windows 11 x64.");
@@ -179,8 +179,6 @@ fn main() {
         install_dir: install_dir.clone(),
         source_exe,
         bundle_resources: true,
-        create_start_menu_shortcut: true,
-        create_desktop_shortcut: false,
     };
 
     match install(&options) {

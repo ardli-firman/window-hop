@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use window_hop::application::LifecycleCoordinator;
 use window_hop::domain::DraftProfileInput;
 use window_hop::installer::{
-    default_install_dir, install, is_dev_build_path, resolve_installed_app_executable, uninstall,
+    default_install_dir, install, is_dev_build_path, resolve_installed_app_executable,
     validate_os_baseline, verify_installation, Arch, InstallError, InstallOptions, OsVersion,
 };
 use window_hop::persistence::FileProfileStore;
@@ -43,6 +43,9 @@ fn test_is_dev_build_path_detects_target_debug_and_release() {
         "C:\\Program Files\\Window Hop\\window-hop.exe"
     )));
     assert!(!is_dev_build_path(Path::new("/usr/local/bin/window-hop")));
+    assert!(!is_dev_build_path(Path::new(
+        "D:\\CustomApp\\window-hop.exe"
+    )));
 }
 
 #[test]
@@ -132,8 +135,6 @@ fn test_install_copies_executable_resources_and_creates_manifest() {
         install_dir: target_dir.clone(),
         source_exe: source_exe.clone(),
         bundle_resources: true,
-        create_start_menu_shortcut: false,
-        create_desktop_shortcut: false,
     };
 
     let receipt = install(&options).expect("Installation should succeed");
@@ -170,8 +171,6 @@ fn test_install_fails_when_source_payload_is_missing() {
         install_dir: target_dir,
         source_exe: missing_exe.clone(),
         bundle_resources: true,
-        create_start_menu_shortcut: false,
-        create_desktop_shortcut: false,
     };
 
     let err = install(&options).unwrap_err();
@@ -194,8 +193,6 @@ fn test_verify_installation_detects_missing_executable() {
         install_dir: target_dir.clone(),
         source_exe,
         bundle_resources: true,
-        create_start_menu_shortcut: false,
-        create_desktop_shortcut: false,
     };
 
     install(&options).unwrap();
@@ -213,37 +210,7 @@ fn test_verify_installation_detects_missing_executable() {
 }
 
 #[test]
-fn test_uninstall_removes_installed_files_and_cleans_directory() {
-    let temp = tempfile::tempdir().unwrap();
-    let source_dir = temp.path().join("source");
-    fs::create_dir_all(&source_dir).unwrap();
-    let source_exe = source_dir.join("window-hop.exe");
-    fs::write(&source_exe, b"MZ_FAKE_PE").unwrap();
-
-    let target_dir = temp.path().join("installed");
-    let options = InstallOptions {
-        install_dir: target_dir.clone(),
-        source_exe,
-        bundle_resources: true,
-        create_start_menu_shortcut: false,
-        create_desktop_shortcut: false,
-    };
-
-    install(&options).unwrap();
-    assert!(target_dir.join("window-hop.exe").exists());
-    assert!(target_dir.join("INSTALL-GUIDE.txt").exists());
-    assert!(target_dir.join("install-manifest.json").exists());
-
-    // Uninstall
-    let receipt = uninstall(&target_dir).expect("Uninstall should succeed");
-    assert!(!target_dir.join("window-hop.exe").exists());
-    assert!(!target_dir.join("INSTALL-GUIDE.txt").exists());
-    assert!(!target_dir.join("install-manifest.json").exists());
-    assert_eq!(receipt.uninstalled_files.len(), 3);
-}
-
-#[test]
-fn test_resolve_installed_app_executable_prefers_installed_location() {
+fn test_resolve_installed_app_executable_prefers_installed_location_over_dev_build() {
     let temp = tempfile::tempdir().unwrap();
     let install_dir = temp.path().join("Window Hop");
     fs::create_dir_all(&install_dir).unwrap();
@@ -267,6 +234,22 @@ fn test_resolve_installed_app_executable_prefers_installed_location() {
 }
 
 #[test]
+fn test_resolve_installed_app_executable_preserves_custom_installed_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let custom_install_dir = temp.path().join("CustomDrive").join("Hop");
+    fs::create_dir_all(&custom_install_dir).unwrap();
+    let custom_exe = custom_install_dir.join("window-hop.exe");
+    fs::write(&custom_exe, b"MZ_CUSTOM_INSTALLED").unwrap();
+
+    // When running from custom installed path (which is NOT a target/debug dev build)
+    let resolved = resolve_installed_app_executable(Some(&custom_exe), None);
+    assert_eq!(
+        resolved, custom_exe,
+        "Should preserve custom installation directory when running from it"
+    );
+}
+
+#[test]
 fn test_create_profile_shortcut_and_startup_use_installed_application_location() {
     let temp = tempfile::tempdir().unwrap();
     let install_dir = temp.path().join("installed_app");
@@ -283,7 +266,6 @@ fn test_create_profile_shortcut_and_startup_use_installed_application_location()
     coord.set_shortcut_creator(shortcut_creator.clone());
 
     let startup_manager = std::sync::Arc::new(MockStartupManager::new(false));
-    startup_manager.set_app_exe(Some(installed_exe.clone()));
     coord.set_startup_manager(startup_manager.clone());
 
     // Set the resolved application executable to the installed executable

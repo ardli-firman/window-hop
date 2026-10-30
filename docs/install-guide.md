@@ -1,6 +1,6 @@
 # Panduan Pemasangan Window Hop (Installation Guide)
 
-Dokumen ini mendefinisikan batas sistem yang telah diverifikasi dan prosedur instalasi Window Hop untuk petugas pemeliharaan workstation poliklinik.
+Dokumen ini mendefinisikan batas sistem yang diverifikasi dan prosedur instalasi Window Hop untuk petugas pemeliharaan workstation poliklinik.
 
 ## 1. Batasan Sistem Operasi dan Runtime yang Diverifikasi
 
@@ -8,10 +8,10 @@ Sesuai [ADR 0002](adr/0002-target-windows-10-and-11.md) dan spesifikasi produk v
 
 | Komponen | Persyaratan Minimum yang Diverifikasi | Catatan |
 |---|---|---|
-| **Sistem Operasi** | Windows 10 64-bit (Build 19041 / 2004 atau lebih baru)<br>Windows 11 64-bit | Windows 7, Windows 8/8.1, dan Windows 32-bit **tidak didukung**. |
+| **Sistem Operasi** | Windows 10 64-bit (Build 19041 / 2004 atau lebih baru)<br>Windows 11 64-bit | Windows 7, Windows 8/8.1, dan Windows 32-bit **tidak didukung**. Validasi fisik lengkap dijadwalkan pada ticket #16 dan #17. |
 | **Arsitektur Aplikasi** | x64 (64-bit) | Window Hop dibangun sebagai biner x64. |
 | **Arsitektur Browser** | x86 (32-bit) dan x64 (64-bit) | Browser poliklinik 32-bit maupun 64-bit didukung pada OS 64-bit. |
-| **Akselerasi Grafis & GPUI** | Direct3D 11 (Feature Level 11_0+) / Direct3D 12 | GPUI memanfaatkan rendering DirectX/Direct3D dan DirectWrite font. |
+| **Akselerasi Grafis & GPUI** | Direct3D 11 (Feature Level 11_0+) / Direct3D 12 | GPUI memanfaatkan rendering DirectX/Direct3D dan DirectWrite font. Resource/asset UI dan font disertakan langsung (ter-embed) di dalam biner aplikasi via `gpui-kit`. |
 | **Runtime C++** | Microsoft Visual C++ 2015–2022 Redistributable (x64) | Umumnya telah terpasang pada Windows 10/11 terbarui. |
 | **Hak Akses Pengguna** | Standard User (Tanpa Hak Administrator / UAC) | Lokasi instalasi per-pengguna tidak memerlukan hak administrator. |
 
@@ -47,12 +47,6 @@ Jika workstation memerlukan instalasi di lokasi lain (misal drive D:):
 
 ```powershell
 .\window-hop-installer.exe --dir "D:\Aplikasi\Window Hop"
-```
-
-### Pencopotan Instalasi (Uninstallation)
-
-```powershell
-.\window-hop-installer.exe --uninstall
 ```
 
 ## 4. Perilaku Shortcut Profil dan Startup

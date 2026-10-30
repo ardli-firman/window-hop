@@ -549,7 +549,9 @@ impl LifecycleCoordinator {
             return Err(ApplicationError::BlockedByCorruptState(reason));
         }
 
-        // 1. Sinkronkan dengan pendaftaran startup OS terlebih dahulu
+        // 1. Sinkronkan dengan pendaftaran startup OS terlebih dahulu menggunakan executable yang terpasang
+        self.startup_manager
+            .set_app_executable(self.app_executable());
         self.startup_manager
             .set_startup_registered(enabled)
             .map_err(ApplicationError::Platform)?;

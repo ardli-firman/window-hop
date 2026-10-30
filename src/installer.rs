@@ -7,6 +7,9 @@ use thiserror::Error;
 /// Kesalahan yang dapat terjadi pada proses instalasi atau validasi sistem.
 #[derive(Debug, Error)]
 pub enum InstallError {
+    #[error("Platform {0} tidak didukung. Installer Window Hop memerlukan Windows.")]
+    UnsupportedPlatform(String),
+
     #[error("Arsitektur OS {found} tidak didukung. Window Hop memerlukan Windows 64-bit (x64).")]
     UnsupportedArchitecture { found: String },
 
@@ -20,9 +23,6 @@ pub enum InstallError {
 
     #[error("Payload executable instalasi tidak ditemukan pada: {0}")]
     MissingPayload(PathBuf),
-
-    #[error("Gagal membuat shortcut: {0}")]
-    ShortcutError(String),
 
     #[error("Verifikasi instalasi gagal: {0}")]
     VerificationFailed(String),
@@ -61,7 +61,7 @@ pub struct OsVersion {
 }
 
 /// Batas minimum build Windows yang divalidasi untuk Window Hop (Windows 10 2004 / Build 19041).
-pub const MINIMUM_WINDOWS_BUILD: u32 = 19041;
+pub(crate) const MINIMUM_WINDOWS_BUILD: u32 = 19041;
 pub const MINIMUM_WINDOWS_VERSION_STR: &str = "Windows 10 build 19041 (10.0.19041)";
 pub const APPLICATION_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -129,37 +129,32 @@ pub fn is_dev_build_path(path: &Path) -> bool {
 
 /// Mengambil path executable aplikasi yang terpasang atau sedang berjalan.
 ///
-/// Jika terdapat instalasi pada direktori instalasi konsisten (e.g. `%LOCALAPPDATA%\Programs\Window Hop\window-hop.exe`),
-/// jalur tersebut diprioritaskan agar shortcut dan startup mengarah ke instalasi resmi,
-/// bukan ke folder build pengembang (`target/debug` atau `target/release`).
+/// Aturan resolusi:
+/// 1. Jika aplikasi sedang berjalan dari folder yang bukan folder build pengembang
+///    (e.g. `%LOCALAPPDATA%\Programs\Window Hop` atau direktori instalasi kustom `--dir`),
+///    gunakan executable tersebut secara langsung.
+/// 2. Jika aplikasi sedang dipanggil dari folder build pengembang (`target/debug` atau `target/release`),
+///    alihkan ke executable pada direktori instalasi resmi (default atau kustom jika diberikan)
+///    agar shortcut dan pendaftaran startup tidak menunjuk ke folder build dev.
 pub fn resolve_installed_app_executable(
     current_exe: Option<&Path>,
     install_dir: Option<&Path>,
 ) -> PathBuf {
-    let target_dir = match install_dir {
-        Some(d) => d.to_path_buf(),
-        None => default_install_dir(),
-    };
-    let installed_exe = target_dir.join("window-hop.exe");
+    let current = current_exe
+        .map(|p| p.to_path_buf())
+        .or_else(|| std::env::current_exe().ok());
 
-    // Jika executable terpasang sudah ada di lokasi konsisten, selalu gunakan executable tersebut
-    if installed_exe.exists() {
-        return installed_exe;
-    }
-
-    // Jika diberikan current_exe eksplisit atau didapat dari env
-    if let Some(curr) = current_exe {
-        if !is_dev_build_path(curr) {
-            return curr.to_path_buf();
-        }
-    } else if let Ok(curr) = std::env::current_exe() {
+    if let Some(curr) = current {
         if !is_dev_build_path(&curr) {
             return curr;
         }
     }
 
-    // Fallback default ke installed_exe agar registrasi OS tetap konsisten
-    installed_exe
+    let target_dir = match install_dir {
+        Some(d) => d.to_path_buf(),
+        None => default_install_dir(),
+    };
+    target_dir.join("window-hop.exe")
 }
 
 /// Konfigurasi parameter eksekusi instalasi.
@@ -169,12 +164,8 @@ pub struct InstallOptions {
     pub install_dir: PathBuf,
     /// Path executable aplikasi sumber yang akan dipasang.
     pub source_exe: PathBuf,
-    /// Apakah menyertakan dokumen panduan instalasi dan dependensi GPUI.
+    /// Apakah menyertakan dokumen panduan instalasi dan deskripsi dependensi GPUI.
     pub bundle_resources: bool,
-    /// Apakah membuat shortcut di Start Menu.
-    pub create_start_menu_shortcut: bool,
-    /// Apakah membuat shortcut di Desktop.
-    pub create_desktop_shortcut: bool,
 }
 
 impl Default for InstallOptions {
@@ -183,8 +174,6 @@ impl Default for InstallOptions {
             install_dir: default_install_dir(),
             source_exe: PathBuf::from("window-hop.exe"),
             bundle_resources: true,
-            create_start_menu_shortcut: true,
-            create_desktop_shortcut: false,
         }
     }
 }
@@ -199,13 +188,6 @@ pub struct InstallReceipt {
     pub version: String,
 }
 
-/// Tanda bukti pencopotan instalasi (uninstallation) Window Hop.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct UninstallReceipt {
-    pub uninstalled_files: Vec<PathBuf>,
-    pub removed_dir: bool,
-}
-
 /// Manifest informasi berkas instalasi.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InstallManifest {
@@ -217,19 +199,20 @@ pub struct InstallManifest {
 }
 
 /// Petunjuk pemasangan dan batas baseline OS/runtime yang diverifikasi.
-pub const INSTALL_GUIDE_CONTENT: &str = r#"================================================================================
+pub(crate) const INSTALL_GUIDE_CONTENT: &str = r#"================================================================================
 Window Hop - Petunjuk Pemasangan dan Batasan Sistem Terverifikasi
 ================================================================================
 
 1. LINGKUNGAN SISTEM OPERASI TERVERIFIKASI
 - Target OS: Windows 10 64-bit (Build 19041 / Version 2004 atau lebih baru) dan Windows 11 64-bit.
-- Arsitektur OS: x64 (64-bit). OS 32-bit (x86) tidak didukung.
+- Arsitektur OS: x64 (64-bit). OS 32-bit (x86) tidak didukung (ADR 0002).
 - Hak akses: Instalasi per-pengguna (%LOCALAPPDATA%\Programs\Window Hop) tidak memerlukan hak administrator (UAC).
 
 2. PERSYARATAN RUNTIME GPUI & GRAFIS
 - Driver grafis dengan dukungan DirectX 11 / Direct3D 11 Feature Level 11_0 atau lebih baru.
 - Layanan font sistem DirectWrite Windows aktif.
-- Visual C++ Redistributable 2015-2022 x64 (biasanya sudah tersedia di Windows 10/11 terbarui).
+- Visual C++ Redistributable 2015-2022 x64 (biasanya sudah tersedia di Windows 10/11).
+- Resource/asset UI dan font disertakan langsung (ter-embed via rust-embed) di dalam window-hop.exe.
 
 3. BROWSER TERVERIFIKASI
 Window Hop mendukung browser poliklinik 32-bit maupun 64-bit pada OS 64-bit:
@@ -240,7 +223,7 @@ Window Hop mendukung browser poliklinik 32-bit maupun 64-bit pada OS 64-bit:
 Setiap profil menjalankan sesi browser terisolasi (--user-data-dir atau -profile) tanpa mengganggu browser kerja perawat.
 
 4. SHORTCUT & STARTUP
-- Shortcut profil dibuat menunjuk ke direktori instalasi aplikasi resmi, bukan direktori build.
+- Shortcut profil dibuat melalui UI Window Hop dan menunjuk ke direktori instalasi aplikasi resmi, bukan direktori build.
 - Opsi startup otomatis mendaftarkan aplikasi di HKCU:\Software\Microsoft\Windows\CurrentVersion\Run dengan flag --startup.
 "#;
 
@@ -278,55 +261,6 @@ pub fn install(options: &InstallOptions) -> Result<InstallReceipt, InstallError>
     installed_files.push(manifest_path.clone());
 
     verify_installation(&options.install_dir)
-}
-
-/// Menghapus berkas yang telah terpasang saat uninstallation Window Hop.
-pub fn uninstall(install_dir: &Path) -> Result<UninstallReceipt, InstallError> {
-    if !install_dir.exists() {
-        return Ok(UninstallReceipt {
-            uninstalled_files: Vec::new(),
-            removed_dir: false,
-        });
-    }
-
-    let manifest_path = install_dir.join("install-manifest.json");
-    let mut files_to_remove = Vec::new();
-    if manifest_path.exists() {
-        if let Ok(content) = fs::read_to_string(&manifest_path) {
-            if let Ok(manifest) = serde_json::from_str::<InstallManifest>(&content) {
-                for file in manifest.installed_files {
-                    if file.exists() {
-                        files_to_remove.push(file);
-                    }
-                }
-            }
-        }
-    }
-
-    // Selalu periksa executable dan manifest
-    let exe = install_dir.join("window-hop.exe");
-    if exe.exists() && !files_to_remove.contains(&exe) {
-        files_to_remove.push(exe);
-    }
-    if manifest_path.exists() && !files_to_remove.contains(&manifest_path) {
-        files_to_remove.push(manifest_path.clone());
-    }
-
-    let mut uninstalled_files = Vec::new();
-    for file in files_to_remove {
-        if file.exists() {
-            fs::remove_file(&file)?;
-            uninstalled_files.push(file);
-        }
-    }
-
-    // Bersihkan direktori jika sudah kosong
-    let removed_dir = fs::remove_dir(install_dir).is_ok();
-
-    Ok(UninstallReceipt {
-        uninstalled_files,
-        removed_dir,
-    })
 }
 
 /// Memverifikasi integritas berkas instalasi Window Hop pada direktori yang ditentukan.

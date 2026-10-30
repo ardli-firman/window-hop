@@ -788,19 +788,21 @@ impl Drop for WindowsTrayProvider {
 
 /// Implementasi StartupManager untuk platform Windows menggunakan registry Run key.
 pub struct WindowsStartupManager {
-    app_exe: Option<std::path::PathBuf>,
+    app_exe: std::sync::Mutex<Option<std::path::PathBuf>>,
 }
 
 impl WindowsStartupManager {
     /// Membuat instance baru WindowsStartupManager.
     pub fn new() -> Self {
-        Self { app_exe: None }
+        Self {
+            app_exe: std::sync::Mutex::new(None),
+        }
     }
 
     /// Membuat instance baru WindowsStartupManager dengan path executable eksplisit.
     pub fn with_app_exe(app_exe: std::path::PathBuf) -> Self {
         Self {
-            app_exe: Some(app_exe),
+            app_exe: std::sync::Mutex::new(Some(app_exe)),
         }
     }
 }
@@ -812,6 +814,10 @@ impl Default for WindowsStartupManager {
 }
 
 impl StartupManager for WindowsStartupManager {
+    fn set_app_executable(&self, app_exe: std::path::PathBuf) {
+        *self.app_exe.lock().unwrap() = Some(app_exe);
+    }
+
     fn is_startup_registered(&self) -> Result<bool, PlatformError> {
         let ps_script = r#"& { param($name) $p = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $name -ErrorAction SilentlyContinue; if ($p -and $p.$name) { exit 0 } else { exit 1 } }"#;
 
@@ -834,9 +840,18 @@ impl StartupManager for WindowsStartupManager {
 
     fn set_startup_registered(&self, enabled: bool) -> Result<(), PlatformError> {
         if enabled {
-            let app_exe = match &self.app_exe {
-                Some(p) => p.clone(),
-                None => crate::installer::resolve_installed_app_executable(None, None),
+            let app_exe = {
+                let guard = self.app_exe.lock().unwrap();
+                if let Some(ref p) = *guard {
+                    p.clone()
+                } else {
+                    std::env::current_exe().map_err(|e| {
+                        PlatformError::Os(format!(
+                            "Gagal mendapatkan path executable aplikasi: {}",
+                            e
+                        ))
+                    })?
+                }
             };
             let val = format!("\"{}\" --startup", app_exe.to_string_lossy());
 
