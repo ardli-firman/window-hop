@@ -175,6 +175,7 @@ pub struct LifecycleCoordinator {
     tray_provider: Arc<dyn TrayProvider>,
     startup_manager: Arc<dyn StartupManager>,
     browser_detector: Arc<dyn BrowserDetector>,
+    app_executable: Option<PathBuf>,
     base_data_dir: PathBuf,
     config: AppConfig,
     active_instances: HashMap<ProfileId, ActiveProfileInstance>,
@@ -201,6 +202,7 @@ impl LifecycleCoordinator {
             tray_provider: default_tray_provider(),
             startup_manager: default_startup_manager(),
             browser_detector: default_browser_detector(),
+            app_executable: None,
             base_data_dir,
             config: AppConfig::default(),
             active_instances: HashMap::new(),
@@ -477,6 +479,19 @@ impl LifecycleCoordinator {
         &self.browser_detector
     }
 
+    /// Mengatur path executable aplikasi yang digunakan untuk pembuatan shortcut profil.
+    pub fn set_app_executable(&mut self, app_exe: PathBuf) {
+        self.app_executable = Some(app_exe);
+    }
+
+    /// Mengambil path executable aplikasi yang diprioritaskan dari instalasi resmi.
+    pub fn app_executable(&self) -> PathBuf {
+        if let Some(ref exe) = self.app_executable {
+            return exe.clone();
+        }
+        crate::installer::resolve_installed_app_executable(None, None)
+    }
+
     /// Mendeteksi browser yang terpasang pada sistem operasi.
     pub fn detected_browsers(&self) -> Result<Vec<DetectedBrowser>, ApplicationError> {
         self.browser_detector
@@ -688,7 +703,7 @@ impl LifecycleCoordinator {
         id: &ProfileId,
         custom_dir: Option<PathBuf>,
     ) -> Result<PathBuf, ApplicationError> {
-        let app_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("window-hop.exe"));
+        let app_exe = self.app_executable();
         self.create_profile_shortcut_with_exe(id, custom_dir, app_exe)
     }
 

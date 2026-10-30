@@ -5,6 +5,14 @@ edition = "2021"
 authors = ["Window Hop Contributors"]
 description = "Window Hop multi-display queue browser manager"
 
+[[bin]]
+name = "window-hop"
+path = "src/main.rs"
+
+[[bin]]
+name = "window-hop-installer"
+path = "src/bin/installer.rs"
+
 [dependencies]
 async-channel = "2.5"
 gpui-kit = "0.8.1"
