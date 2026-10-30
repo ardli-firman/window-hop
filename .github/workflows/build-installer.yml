@@ -31,11 +31,18 @@ jobs:
   check-and-test:
     name: Lint & Test (Linux)
     runs-on: ubuntu-latest
+    env:
+      RUST_FONTCONFIG_DLOPEN: 1
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -60,7 +67,6 @@ jobs:
   build-installer-windows:
     name: Build Windows Installer .exe
     runs-on: windows-latest
-    needs: [check-and-test]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -101,6 +107,10 @@ jobs:
 
           echo "version=$CURRENT_VER" >> "$GITHUB_OUTPUT"
           echo "full_version=$GIT_FULL" >> "$GITHUB_OUTPUT"
+
+      - name: Run Tests via Makefile (Windows)
+        shell: bash
+        run: make test
 
       - name: Build Dev Executables via Makefile
         if: ${{ github.event.inputs.build_type == 'dev' && !startsWith(github.ref, 'refs/tags/v') }}
