@@ -1,5 +1,9 @@
 //! Browser capabilities, isolation verification, and launch planning.
 
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 /// Kesalahan terkait browser dan parameter peluncuran.
@@ -235,7 +239,144 @@ impl EdgeAdapter {
     }
 }
 
-/// Status dukungan verifikasi browser.
+/// Arsitektur biner executable browser (x86, x64, ARM64, atau tidak diketahui).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BrowserArchitecture {
+    X86,
+    X64,
+    Arm64,
+    Unknown,
+}
+
+impl fmt::Display for BrowserArchitecture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::X86 => write!(f, "x86 (32-bit)"),
+            Self::X64 => write!(f, "x64 (64-bit)"),
+            Self::Arm64 => write!(f, "ARM64"),
+            Self::Unknown => write!(f, "Tidak Diketahui"),
+        }
+    }
+}
+
+/// Membaca arsitektur biner dari file executable PE Windows (.exe).
+///
+/// Memeriksa DOS MZ header dan PE Machine header tanpa ketergantungan OS runtime khusus.
+/// Mengembalikan `BrowserArchitecture::Unknown` jika file tidak dapat dibaca atau bukan PE valid.
+pub fn read_executable_architecture(path: &Path) -> BrowserArchitecture {
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return BrowserArchitecture::Unknown,
+    };
+
+    let mut dos_header = [0u8; 64];
+    if file.read_exact(&mut dos_header).is_err() {
+        return BrowserArchitecture::Unknown;
+    }
+
+    // Periksa MZ signature (0x5A4D)
+    if dos_header[0] != b'M' || dos_header[1] != b'Z' {
+        return BrowserArchitecture::Unknown;
+    }
+
+    // Offset e_lfanew berada pada offset 0x3C (4 bytes little-endian)
+    let e_lfanew = u32::from_le_bytes([
+        dos_header[0x3C],
+        dos_header[0x3D],
+        dos_header[0x3E],
+        dos_header[0x3F],
+    ]);
+
+    if file.seek(SeekFrom::Start(e_lfanew as u64)).is_err() {
+        return BrowserArchitecture::Unknown;
+    }
+
+    let mut pe_header = [0u8; 6];
+    if file.read_exact(&mut pe_header).is_err() {
+        return BrowserArchitecture::Unknown;
+    }
+
+    // Periksa PE signature: 'PE\0\0'
+    if pe_header[0] != b'P' || pe_header[1] != b'E' || pe_header[2] != 0 || pe_header[3] != 0 {
+        return BrowserArchitecture::Unknown;
+    }
+
+    // Machine architecture pada offset pe_header + 4 (2 bytes little-endian)
+    let machine = u16::from_le_bytes([pe_header[4], pe_header[5]]);
+    match machine {
+        0x014c => BrowserArchitecture::X86,   // IMAGE_FILE_MACHINE_I386
+        0x8664 => BrowserArchitecture::X64,   // IMAGE_FILE_MACHINE_AMD64
+        0xaa64 => BrowserArchitecture::Arm64, // IMAGE_FILE_MACHINE_ARM64
+        _ => BrowserArchitecture::Unknown,
+    }
+}
+
+/// Bukti dan rincian dukungan kompatibilitas browser secara jujur.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserSupportEvidence {
+    pub browser_name: String,
+    pub version: Option<String>,
+    pub architecture: BrowserArchitecture,
+    pub is_safe_to_activate: bool,
+    pub evidence_text: String,
+    pub limitations: Option<String>,
+}
+
+/// Deskripsi browser yang terdeteksi terpasang pada sistem.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetectedBrowser {
+    pub name: String,
+    pub executable_path: PathBuf,
+    pub version: Option<String>,
+    pub architecture: BrowserArchitecture,
+}
+
+/// Status evaluasi kompatibilitas browser yang komprehensif.
+///
+/// Membedakan:
+/// 1. `SafeToActivate`: Executable terverifikasi untuk isolasi sesi dan kepemilikan instance (misal Microsoft Edge).
+/// 2. `Unverified`: Executable ditemukan pada disk tetapi belum diverifikasi; profil boleh disimpan namun gate aktivasi diblokir.
+/// 3. `Unavailable`: Executable tidak ditemukan atau tidak dapat diakses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrowserCompatibilityStatus {
+    SafeToActivate {
+        adapter: EdgeAdapter,
+        evidence: BrowserSupportEvidence,
+    },
+    Unverified {
+        evidence: BrowserSupportEvidence,
+    },
+    Unavailable {
+        path: PathBuf,
+        reason: String,
+    },
+}
+
+impl BrowserCompatibilityStatus {
+    /// Apakah browser aman diaktifkan untuk meluncurkan profil.
+    pub fn is_safe_to_activate(&self) -> bool {
+        matches!(self, Self::SafeToActivate { .. })
+    }
+
+    /// Mengambil adapter browser jika terverifikasi.
+    pub fn adapter(&self) -> Option<EdgeAdapter> {
+        match self {
+            Self::SafeToActivate { adapter, .. } => Some(*adapter),
+            _ => None,
+        }
+    }
+
+    /// Mengambil informasi bukti dukungan kompatibilitas jika executable tersedia.
+    pub fn evidence(&self) -> Option<&BrowserSupportEvidence> {
+        match self {
+            Self::SafeToActivate { evidence, .. } => Some(evidence),
+            Self::Unverified { evidence } => Some(evidence),
+            Self::Unavailable { .. } => None,
+        }
+    }
+}
+
+/// Status dukungan verifikasi browser sederhana (kompatibilitas backward).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserSupportStatus {
     /// Browser telah diverifikasi isolasi sesi dan penanganan kepemilikannya.
@@ -257,5 +398,67 @@ pub fn detect_browser_support(executable: &Path) -> BrowserSupportStatus {
         BrowserSupportStatus::Verified(EdgeAdapter::new())
     } else {
         BrowserSupportStatus::Unverified
+    }
+}
+
+/// Mengevaluasi status kompatibilitas browser secara lengkap dan jujur berdasarkan keberadaan file,
+/// arsitektur biner, dan adapter yang terverifikasi.
+pub fn evaluate_browser_compatibility(executable: &Path) -> BrowserCompatibilityStatus {
+    if !executable.exists() || !executable.is_file() {
+        return BrowserCompatibilityStatus::Unavailable {
+            path: executable.to_path_buf(),
+            reason: format!(
+                "File executable browser '{}' tidak ditemukan atau tidak tersedia",
+                executable.display()
+            ),
+        };
+    }
+
+    let architecture = read_executable_architecture(executable);
+    let path_str = executable.to_string_lossy();
+    let file_name = path_str
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    if file_name == "msedge.exe" || file_name == "msedge" {
+        let adapter = EdgeAdapter::new();
+        BrowserCompatibilityStatus::SafeToActivate {
+            adapter,
+            evidence: BrowserSupportEvidence {
+                browser_name: "Microsoft Edge".to_string(),
+                version: None,
+                architecture,
+                is_safe_to_activate: true,
+                evidence_text: "Dukungan pemisahan sesi browser profil (--user-data-dir) dan kepemilikan instance telah diverifikasi pada Windows 10/11 x64.".to_string(),
+                limitations: Some("Mode kiosk atau InPrivate tidak mempertahankan sesi login persisten.".to_string()),
+            },
+        }
+    } else {
+        let browser_name = if file_name == "chrome.exe" || file_name == "chrome" {
+            "Google Chrome".to_string()
+        } else if file_name == "firefox.exe" || file_name == "firefox" {
+            "Mozilla Firefox".to_string()
+        } else if file_name == "brave.exe" || file_name == "brave" {
+            "Brave Browser".to_string()
+        } else {
+            let stem = executable
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Browser Portable".to_string());
+            format!("Browser {}", stem)
+        };
+
+        BrowserCompatibilityStatus::Unverified {
+            evidence: BrowserSupportEvidence {
+                browser_name,
+                version: None,
+                architecture,
+                is_safe_to_activate: false,
+                evidence_text: "Browser ditemukan pada sistem, namun adapter pemisahan sesi dan kepemilikan instance belum diverifikasi pada Windows 10/11 x64. Profil dapat disimpan tetapi belum aman diaktifkan.".to_string(),
+                limitations: Some("Aktivasi diblokir sampai adapter terverifikasi tersedia.".to_string()),
+            },
+        }
     }
 }

@@ -1,6 +1,6 @@
 //! Application coordination, lifecycle management, and profile operations.
 
-use crate::browsers::{BrowserError, LoginRetentionNote};
+use crate::browsers::{BrowserCompatibilityStatus, BrowserError, LoginRetentionNote};
 use crate::domain::{
     AppConfig, DraftProfileInput, ExitReason, MonitorDescriptor, MonitorIdentity, ProcessId,
     Profile, ProfileId, ProfileLifecycleState, ProfileStatus, TargetMonitorStatus,
@@ -8,10 +8,10 @@ use crate::domain::{
 };
 use crate::persistence::{PersistenceError, ProfileStore};
 use crate::platform::{
-    default_clock, default_monitor_provider, default_process_launcher, default_shortcut_creator,
-    default_startup_manager, default_tray_provider, Clock, ManagedProcess, MonitorProvider,
-    PlatformError, ProcessLauncher, ShortcutCreator, ShortcutSpec, StartupManager, TrayProvider,
-    ACTIVATE_PROFILE_FLAG,
+    default_browser_detector, default_clock, default_monitor_provider, default_process_launcher,
+    default_shortcut_creator, default_startup_manager, default_tray_provider, BrowserDetector,
+    Clock, DetectedBrowser, ManagedProcess, MonitorProvider, PlatformError, ProcessLauncher,
+    ShortcutCreator, ShortcutSpec, StartupManager, TrayProvider, ACTIVATE_PROFILE_FLAG,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -111,6 +111,9 @@ pub enum ApplicationError {
     #[error("Kesalahan browser: {0}")]
     Browser(#[from] BrowserError),
 
+    #[error("Executable browser '{0}' tidak ditemukan atau tidak tersedia")]
+    BrowserExecutableNotFound(PathBuf),
+
     #[error("Dukungan pemisahan sesi dan kepemilikan instance untuk browser '{0}' belum diverifikasi: {1}")]
     BrowserNotVerified(String, String),
 
@@ -171,6 +174,7 @@ pub struct LifecycleCoordinator {
     shortcut_creator: Arc<dyn ShortcutCreator>,
     tray_provider: Arc<dyn TrayProvider>,
     startup_manager: Arc<dyn StartupManager>,
+    browser_detector: Arc<dyn BrowserDetector>,
     base_data_dir: PathBuf,
     config: AppConfig,
     active_instances: HashMap<ProfileId, ActiveProfileInstance>,
@@ -196,6 +200,7 @@ impl LifecycleCoordinator {
             shortcut_creator: default_shortcut_creator(),
             tray_provider: default_tray_provider(),
             startup_manager: default_startup_manager(),
+            browser_detector: default_browser_detector(),
             base_data_dir,
             config: AppConfig::default(),
             active_instances: HashMap::new(),
@@ -460,6 +465,44 @@ impl LifecycleCoordinator {
     /// Mengambil referensi pengelola startup platform.
     pub fn startup_manager(&self) -> &Arc<dyn StartupManager> {
         &self.startup_manager
+    }
+
+    /// Mengatur pendeteksi browser platform.
+    pub fn set_browser_detector(&mut self, browser_detector: Arc<dyn BrowserDetector>) {
+        self.browser_detector = browser_detector;
+    }
+
+    /// Mengambil referensi pendeteksi browser platform.
+    pub fn browser_detector(&self) -> &Arc<dyn BrowserDetector> {
+        &self.browser_detector
+    }
+
+    /// Mendeteksi browser yang terpasang pada sistem operasi.
+    pub fn detected_browsers(&self) -> Result<Vec<DetectedBrowser>, ApplicationError> {
+        self.browser_detector
+            .detect_installed_browsers()
+            .map_err(ApplicationError::Platform)
+    }
+
+    /// Mengevaluasi status kompatibilitas dan bukti dukungan browser secara jujur.
+    pub fn check_browser_compatibility(
+        &self,
+        executable: &std::path::Path,
+    ) -> BrowserCompatibilityStatus {
+        crate::browsers::evaluate_browser_compatibility(executable)
+    }
+
+    /// Memverifikasi keberadaan file executable browser pada disk jika dapat diakses secara lokal.
+    fn verify_executable_available(path: &std::path::Path) -> Result<(), ApplicationError> {
+        let path_str = path.to_string_lossy();
+        let is_simulated_windows_path =
+            cfg!(not(windows)) && (path_str.starts_with("C:") || path_str.starts_with("c:"));
+        if path.components().count() > 1 && !is_simulated_windows_path && !path.exists() {
+            return Err(ApplicationError::BrowserExecutableNotFound(
+                path.to_path_buf(),
+            ));
+        }
+        Ok(())
     }
 
     /// Memeriksa apakah startup otomatis setelah login diaktifkan.
@@ -871,6 +914,9 @@ impl LifecycleCoordinator {
             TargetMonitorStatus::Available(_) => {}
         }
 
+        // Verifikasi keberadaan executable browser
+        Self::verify_executable_available(profile.browser_path())?;
+
         // Verifikasi kapabilitas browser
         let adapter = match crate::browsers::detect_browser_support(profile.browser_path()) {
             crate::browsers::BrowserSupportStatus::Verified(adapter) => adapter,
@@ -914,6 +960,9 @@ impl LifecycleCoordinator {
         if profile.target_monitor().is_none() {
             return Err(ApplicationError::DraftNotReady { id: id.clone() });
         }
+
+        // Verifikasi keberadaan executable browser
+        Self::verify_executable_available(profile.browser_path())?;
 
         // Verifikasi kapabilitas browser
         let adapter = match crate::browsers::detect_browser_support(profile.browser_path()) {

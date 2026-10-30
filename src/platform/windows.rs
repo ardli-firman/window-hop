@@ -1,10 +1,11 @@
 //! Windows display and monitor enumeration using Win32 APIs.
 
-use crate::browsers::LaunchPlan;
+use crate::browsers::{read_executable_architecture, LaunchPlan};
 use crate::domain::{MonitorDescriptor, MonitorIdentity, ProcessId, TrayStatusSummary};
 use crate::platform::{
-    ManagedProcess, MonitorProvider, PlatformError, ProcessLauncher, ShortcutCreator, ShortcutSpec,
-    StartupManager, TrayAction, TrayActionHandler, TrayProvider,
+    BrowserDetector, DetectedBrowser, ManagedProcess, MonitorProvider, PlatformError,
+    ProcessLauncher, ShortcutCreator, ShortcutSpec, StartupManager, TrayAction, TrayActionHandler,
+    TrayProvider,
 };
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -874,5 +875,166 @@ impl StartupManager for WindowsStartupManager {
         }
 
         Ok(())
+    }
+}
+
+/// Implementasi BrowserDetector untuk platform Windows.
+///
+/// Memeriksa jalur instalasi standar (Program Files, Program Files (x86), LocalAppData)
+/// untuk Edge, Chrome, Firefox, dan Brave, serta memeriksa registry StartMenuInternet.
+/// Setiap executable yang ditemukan diperiksa arsitektur PE-nya (x86 vs x64) dan versinya jika ada,
+/// lalu dideduplikasi sebelum dikembalikan.
+pub struct WindowsBrowserDetector;
+
+impl WindowsBrowserDetector {
+    /// Membuat instance baru WindowsBrowserDetector.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for WindowsBrowserDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BrowserDetector for WindowsBrowserDetector {
+    fn detect_installed_browsers(&self) -> Result<Vec<DetectedBrowser>, PlatformError> {
+        let mut candidates = Vec::new();
+
+        // 1. Path-based scanning
+        let prog_files = std::env::var_os("ProgramFiles").map(std::path::PathBuf::from);
+        let prog_files_x86 = std::env::var_os("ProgramFiles(x86)").map(std::path::PathBuf::from);
+        let local_app_data = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from);
+
+        let search_bases = [
+            (
+                prog_files.as_ref(),
+                "Microsoft\\Edge\\Application\\msedge.exe",
+                "Microsoft Edge",
+            ),
+            (
+                prog_files_x86.as_ref(),
+                "Microsoft\\Edge\\Application\\msedge.exe",
+                "Microsoft Edge",
+            ),
+            (
+                local_app_data.as_ref(),
+                "Microsoft\\Edge\\Application\\msedge.exe",
+                "Microsoft Edge",
+            ),
+            (
+                prog_files.as_ref(),
+                "Google\\Chrome\\Application\\chrome.exe",
+                "Google Chrome",
+            ),
+            (
+                prog_files_x86.as_ref(),
+                "Google\\Chrome\\Application\\chrome.exe",
+                "Google Chrome",
+            ),
+            (
+                local_app_data.as_ref(),
+                "Google\\Chrome\\Application\\chrome.exe",
+                "Google Chrome",
+            ),
+            (
+                prog_files.as_ref(),
+                "Mozilla Firefox\\firefox.exe",
+                "Mozilla Firefox",
+            ),
+            (
+                prog_files_x86.as_ref(),
+                "Mozilla Firefox\\firefox.exe",
+                "Mozilla Firefox",
+            ),
+            (
+                prog_files.as_ref(),
+                "BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+                "Brave Browser",
+            ),
+            (
+                local_app_data.as_ref(),
+                "BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+                "Brave Browser",
+            ),
+        ];
+
+        for (base_opt, rel_path, name) in search_bases {
+            if let Some(base) = base_opt {
+                let full_path = base.join(rel_path);
+                if full_path.exists() && full_path.is_file() {
+                    let arch = read_executable_architecture(&full_path);
+                    candidates.push(DetectedBrowser {
+                        name: name.to_string(),
+                        executable_path: full_path,
+                        version: None,
+                        architecture: arch,
+                    });
+                }
+            }
+        }
+
+        // 2. PowerShell / Registry query for StartMenuInternet clients
+        let ps_script = r#"& {
+            $keys = @('HKLM:\SOFTWARE\Clients\StartMenuInternet', 'HKCU:\SOFTWARE\Clients\StartMenuInternet')
+            foreach ($k in $keys) {
+                if (Test-Path $k) {
+                    Get-ChildItem -Path $k -ErrorAction SilentlyContinue | ForEach-Object {
+                        $name = $_.GetValue('')
+                        $cmd = (Get-ItemProperty -Path "$($_.PSPath)\shell\open\command" -ErrorAction SilentlyContinue).'(default)'
+                        if ($cmd) {
+                            $cleanPath = $cmd.Trim().Trim('"')
+                            if ($cleanPath -match '^[a-zA-Z]:\\[^"]+\.exe') {
+                                $cleanPath = $matches[0]
+                            }
+                            if (Test-Path $cleanPath) {
+                                Write-Output "$name|$cleanPath"
+                            }
+                        }
+                    }
+                }
+            }
+        }"#;
+
+        if let Ok(output) = std::process::Command::new("powershell.exe")
+            .arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-Command")
+            .arg(ps_script)
+            .output()
+        {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                for line in text.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    if let Some((name_part, path_part)) = trimmed.split_once('|') {
+                        let path = std::path::PathBuf::from(path_part.trim());
+                        if path.exists() && path.is_file() {
+                            let arch = read_executable_architecture(&path);
+                            let display_name = if name_part.trim().is_empty() {
+                                path.file_stem()
+                                    .map(|s| s.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| "Browser".to_string())
+                            } else {
+                                name_part.trim().to_string()
+                            };
+                            candidates.push(DetectedBrowser {
+                                name: display_name,
+                                executable_path: path,
+                                version: None,
+                                architecture: arch,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(crate::platform::deduplicate_detected_browsers(candidates))
     }
 }

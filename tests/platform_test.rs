@@ -3,12 +3,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
-use window_hop::browsers::{LaunchPlan, LoginRetentionNote};
+use window_hop::browsers::{BrowserArchitecture, LaunchPlan, LoginRetentionNote};
 use window_hop::domain::{MonitorDescriptor, MonitorIdentity, ProcessId, ProfileId};
 use window_hop::platform::{
-    sanitize_shortcut_filename, ActivationCommand, Clock, LocalSingleInstanceCoordinator,
-    MockClock, MockMonitorProvider, MockProcessLauncher, MockSingleInstanceCoordinator,
-    MonitorProvider, PlatformError, ProcessLauncher, SingleInstanceCoordinator,
+    deduplicate_detected_browsers, sanitize_shortcut_filename, ActivationCommand, BrowserDetector,
+    Clock, DetectedBrowser, LocalSingleInstanceCoordinator, MockBrowserDetector, MockClock,
+    MockMonitorProvider, MockProcessLauncher, MockSingleInstanceCoordinator, MonitorProvider,
+    PlatformError, ProcessLauncher, SingleInstanceCoordinator,
 };
 
 #[test]
@@ -390,4 +391,73 @@ fn test_mock_startup_manager_lifecycle_and_error_handling() {
     manager.set_error(Some("Access denied to registry".to_string()));
     assert!(manager.is_startup_registered().is_err());
     assert!(manager.set_startup_registered(true).is_err());
+}
+
+#[test]
+fn test_mock_browser_detector_returns_configured_browsers_and_handles_error() {
+    let b1 = DetectedBrowser {
+        name: "Microsoft Edge".to_string(),
+        executable_path: PathBuf::from(
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        ),
+        version: Some("120.0.0.0".to_string()),
+        architecture: BrowserArchitecture::X64,
+    };
+    let b2 = DetectedBrowser {
+        name: "Google Chrome".to_string(),
+        executable_path: PathBuf::from(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+        version: Some("121.0.0.0".to_string()),
+        architecture: BrowserArchitecture::X86,
+    };
+
+    let detector = MockBrowserDetector::new(vec![b1.clone(), b2.clone()]);
+    let browsers = detector
+        .detect_installed_browsers()
+        .expect("detect browsers");
+    assert_eq!(browsers.len(), 2);
+    assert_eq!(browsers[0], b1);
+    assert_eq!(browsers[1], b2);
+
+    // Simulate error
+    detector.set_error(Some("Gagal membaca registry browser".to_string()));
+    let err = detector.detect_installed_browsers().unwrap_err();
+    match err {
+        PlatformError::Os(msg) => assert!(msg.contains("registry")),
+        other => panic!("expected PlatformError::Os, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_deduplicate_detected_browsers_handles_duplicate_paths() {
+    let b1 = DetectedBrowser {
+        name: "Microsoft Edge".to_string(),
+        executable_path: PathBuf::from(
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        ),
+        version: Some("120.0.0.0".to_string()),
+        architecture: BrowserArchitecture::X64,
+    };
+    // Duplicate path with different case or missing version
+    let b1_dup = DetectedBrowser {
+        name: "Edge Alternate".to_string(),
+        executable_path: PathBuf::from(
+            r"c:\program files (x86)\microsoft\edge\application\msedge.exe",
+        ),
+        version: None,
+        architecture: BrowserArchitecture::X64,
+    };
+    let b2 = DetectedBrowser {
+        name: "Mozilla Firefox".to_string(),
+        executable_path: PathBuf::from(r"C:\Program Files\Mozilla Firefox\firefox.exe"),
+        version: Some("122.0".to_string()),
+        architecture: BrowserArchitecture::X64,
+    };
+
+    let list = vec![b1.clone(), b1_dup, b2.clone()];
+    let deduplicated = deduplicate_detected_browsers(list);
+
+    assert_eq!(deduplicated.len(), 2);
+    assert_eq!(deduplicated[0].name, "Microsoft Edge");
+    assert_eq!(deduplicated[0].version, Some("120.0.0.0".to_string()));
+    assert_eq!(deduplicated[1].name, "Mozilla Firefox");
 }

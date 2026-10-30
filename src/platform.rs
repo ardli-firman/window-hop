@@ -1,6 +1,7 @@
 //! Platform abstraction boundaries for OS display, process lifecycle, and integration.
 
-use crate::browsers::LaunchPlan;
+use crate::browsers::{read_executable_architecture, LaunchPlan};
+pub use crate::browsers::{BrowserArchitecture, DetectedBrowser};
 use crate::domain::{MonitorDescriptor, ProcessId, ProfileId, TrayStatusSummary};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -951,6 +952,114 @@ impl StartupManager for NonWindowsStartupManager {
     }
 }
 
+/// Seam antarmuka pendeteksi instalasi browser pada sistem operasi.
+pub trait BrowserDetector: Send + Sync {
+    /// Mendeteksi semua browser yang terpasang pada sistem.
+    fn detect_installed_browsers(&self) -> Result<Vec<DetectedBrowser>, PlatformError>;
+}
+
+/// Implementasi mock in-memory untuk pengujian pendeteksian browser tanpa bergantung pada OS.
+pub struct MockBrowserDetector {
+    browsers: Mutex<Vec<DetectedBrowser>>,
+    error: Mutex<Option<String>>,
+}
+
+impl MockBrowserDetector {
+    /// Membuat instance baru MockBrowserDetector dengan daftar browser awal.
+    pub fn new(browsers: Vec<DetectedBrowser>) -> Self {
+        Self {
+            browsers: Mutex::new(browsers),
+            error: Mutex::new(None),
+        }
+    }
+
+    /// Mengatur daftar browser yang terdeteksi.
+    pub fn set_browsers(&self, browsers: Vec<DetectedBrowser>) {
+        let mut guard = self.browsers.lock().unwrap();
+        *guard = browsers;
+    }
+
+    /// Mengatur simulasi kesalahan platform OS pada pendeteksian.
+    pub fn set_error(&self, error: Option<String>) {
+        let mut guard = self.error.lock().unwrap();
+        *guard = error;
+    }
+}
+
+impl Default for MockBrowserDetector {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
+impl BrowserDetector for MockBrowserDetector {
+    fn detect_installed_browsers(&self) -> Result<Vec<DetectedBrowser>, PlatformError> {
+        let error_guard = self.error.lock().unwrap();
+        if let Some(ref err_msg) = *error_guard {
+            return Err(PlatformError::Os(err_msg.clone()));
+        }
+
+        let guard = self.browsers.lock().unwrap();
+        Ok(guard.clone())
+    }
+}
+
+/// Menghapus duplikasi entri browser yang terdeteksi berdasarkan normalisasi jalur executable.
+pub fn deduplicate_detected_browsers(browsers: Vec<DetectedBrowser>) -> Vec<DetectedBrowser> {
+    let mut result: Vec<DetectedBrowser> = Vec::new();
+    for b in browsers {
+        let norm_path = b.executable_path.to_string_lossy().to_ascii_lowercase();
+        if let Some(existing) = result
+            .iter_mut()
+            .find(|item| item.executable_path.to_string_lossy().to_ascii_lowercase() == norm_path)
+        {
+            if existing.version.is_none() && b.version.is_some() {
+                existing.version = b.version;
+            }
+        } else {
+            result.push(b);
+        }
+    }
+    result
+}
+
+/// Pendeteksi browser pengganti untuk platform non-Windows.
+#[derive(Debug, Default)]
+pub struct NonWindowsBrowserDetector;
+
+impl NonWindowsBrowserDetector {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl BrowserDetector for NonWindowsBrowserDetector {
+    fn detect_installed_browsers(&self) -> Result<Vec<DetectedBrowser>, PlatformError> {
+        let candidates = [
+            ("Microsoft Edge", "/usr/bin/microsoft-edge"),
+            ("Google Chrome", "/usr/bin/google-chrome"),
+            ("Mozilla Firefox", "/usr/bin/firefox"),
+            ("Brave Browser", "/usr/bin/brave-browser"),
+        ];
+
+        let mut detected = Vec::new();
+        for (name, path_str) in candidates {
+            let path = PathBuf::from(path_str);
+            if path.exists() {
+                let arch = read_executable_architecture(&path);
+                detected.push(DetectedBrowser {
+                    name: name.to_string(),
+                    executable_path: path,
+                    version: None,
+                    architecture: arch,
+                });
+            }
+        }
+
+        Ok(deduplicate_detected_browsers(detected))
+    }
+}
+
 /// Mengembalikan penyedia monitor default untuk platform saat ini.
 pub fn default_monitor_provider() -> Arc<dyn MonitorProvider> {
     #[cfg(windows)]
@@ -1018,5 +1127,18 @@ pub fn default_startup_manager() -> Arc<dyn StartupManager> {
     #[cfg(not(windows))]
     {
         Arc::new(NonWindowsStartupManager)
+    }
+}
+
+/// Mengembalikan pendeteksi browser default untuk platform saat ini.
+pub fn default_browser_detector() -> Arc<dyn BrowserDetector> {
+    #[cfg(windows)]
+    {
+        Arc::new(crate::platform::windows::WindowsBrowserDetector::new())
+    }
+
+    #[cfg(not(windows))]
+    {
+        Arc::new(NonWindowsBrowserDetector::new())
     }
 }
