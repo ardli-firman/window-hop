@@ -598,8 +598,10 @@ fn test_activate_profile_fails_when_browser_unverified() {
         .save_draft_profile(
             None,
             DraftProfileInput::new(
-                "Antrian Gigi Firefox",
-                PathBuf::from(r"C:\Program Files\Mozilla Firefox\firefox.exe"),
+                "Antrian Gigi Brave",
+                PathBuf::from(
+                    r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+                ),
                 "--kiosk",
             )
             .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
@@ -611,7 +613,7 @@ fn test_activate_profile_fails_when_browser_unverified() {
     assert!(can_res.is_err());
     match can_res.unwrap_err() {
         ApplicationError::BrowserNotVerified(path, reason) => {
-            assert!(path.contains("firefox.exe"));
+            assert!(path.contains("brave.exe"));
             assert!(reason.contains("belum diverifikasi"));
         }
         err => panic!("expected BrowserNotVerified, got: {:?}", err),
@@ -6432,13 +6434,13 @@ fn test_activate_profile_fails_when_browser_unverified_even_if_executable_exists
         base_dir,
     );
 
-    // Create an existing Firefox executable on disk (unverified browser)
-    let firefox_exe = create_mock_pe_executable(dir.path(), "firefox.exe", 0x8664);
+    // Create an existing Brave executable on disk (unverified browser)
+    let brave_exe = create_mock_pe_executable(dir.path(), "brave.exe", 0x8664);
 
     let profile_id = coordinator
         .save_draft_profile(
             None,
-            DraftProfileInput::new("Antrian Firefox", firefox_exe.clone(), "--kiosk")
+            DraftProfileInput::new("Antrian Brave", brave_exe.clone(), "--kiosk")
                 .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
         )
         .expect("save profile");
@@ -6447,7 +6449,7 @@ fn test_activate_profile_fails_when_browser_unverified_even_if_executable_exists
     assert!(can_res.is_err());
     match can_res.unwrap_err() {
         ApplicationError::BrowserNotVerified(path, reason) => {
-            assert!(path.contains("firefox.exe"));
+            assert!(path.contains("brave.exe"));
             assert!(reason.contains("belum diverifikasi"));
         }
         err => panic!("expected BrowserNotVerified, got: {:?}", err),
@@ -6948,6 +6950,592 @@ fn test_shortcut_and_startup_activation_with_chrome() {
         .expect("save profile");
 
     // 1. Shortcut activation launches Chrome
+    let shortcut_status = coordinator
+        .handle_shortcut_activation(&profile_id)
+        .expect("shortcut activation");
+    assert!(matches!(shortcut_status, ActivationResult::Launched { .. }));
+    assert_eq!(launcher.launched_processes().len(), 1);
+
+    // 2. Second shortcut activation reuses window profil
+    let shortcut_status2 = coordinator
+        .handle_shortcut_activation(&profile_id)
+        .expect("second shortcut activation");
+    assert!(matches!(shortcut_status2, ActivationResult::Reused { .. }));
+    assert_eq!(
+        launcher.launched_processes().len(),
+        1,
+        "No duplicate process spawned"
+    );
+
+    // 3. Configure as startup profile
+    coordinator
+        .set_startup_enabled(true)
+        .expect("enable startup");
+    coordinator
+        .set_startup_profile_id(Some(profile_id.clone()))
+        .expect("set startup profile");
+
+    let startup_status = coordinator
+        .handle_startup_activation()
+        .expect("startup activation");
+    assert!(matches!(
+        startup_status,
+        Some(ActivationResult::Reused { .. })
+    ));
+    assert_eq!(
+        launcher.launched_processes().len(),
+        1,
+        "Already running instance is reused during startup activation"
+    );
+}
+
+#[test]
+fn test_activate_profile_fails_when_firefox_has_corrupt_binary_architecture() {
+    let dir = tempdir().expect("tempdir");
+    let store = Arc::new(MemoryProfileStore::new());
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE"),
+        name: "Queue Display".to_string(),
+        is_primary: false,
+    }]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = dir.path().join("base_data");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+
+    // Create a corrupt non-PE firefox.exe
+    let corrupt_firefox = dir.path().join("firefox.exe");
+    std::fs::write(&corrupt_firefox, b"not a pe binary").expect("write corrupt firefox");
+
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Firefox Corrupt",
+                corrupt_firefox.clone(),
+                "--kiosk",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
+        )
+        .expect("save profile");
+
+    let can_res = coordinator.can_activate(&profile_id);
+    assert!(can_res.is_err());
+    match can_res.unwrap_err() {
+        ApplicationError::BrowserNotVerified(path, reason) => {
+            assert!(path.contains("firefox.exe"));
+            assert!(reason.contains("belum diverifikasi"));
+        }
+        err => panic!("expected BrowserNotVerified, got: {:?}", err),
+    }
+
+    let act_res = coordinator.activate_profile(&profile_id);
+    assert!(act_res.is_err());
+    assert_eq!(launcher.launched_processes().len(), 0);
+}
+
+#[test]
+fn test_activate_profile_launches_isolated_firefox_on_target_monitor_preserving_nurse_browser() {
+    let dir = tempdir().expect("tempdir");
+    let store = Arc::new(MemoryProfileStore::new());
+    let target_mon = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE-FIREFOX"),
+        name: "Queue Display Firefox".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![
+        MonitorDescriptor {
+            identity: MonitorIdentity::new("MON-PRIMARY"),
+            name: "Workstation Main Display".to_string(),
+            is_primary: true,
+        },
+        target_mon.clone(),
+    ]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = dir.path().join("base_data");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir.clone(),
+    );
+
+    // 1. Simulate nurse's already running working Firefox instance on primary monitor
+    let nurse_working_browser_plan = window_hop::browsers::LaunchPlan {
+        executable: PathBuf::from(r"C:\Program Files\Mozilla Firefox\firefox.exe"),
+        arguments: vec![
+            "-P".to_string(),
+            "NurseSession".to_string(),
+            "https://hospital.simrs/nurse-portal".to_string(),
+        ],
+        user_data_dir: PathBuf::from(
+            r"C:\Users\Nurse\AppData\Roaming\Mozilla\Firefox\Profiles\nurse",
+        ),
+        login_retention: window_hop::browsers::LoginRetentionNote::SessionIsolated {
+            explanation: "Nurse default working session".to_string(),
+        },
+    };
+    let nurse_process = launcher
+        .launch(
+            &nurse_working_browser_plan,
+            &MonitorDescriptor {
+                identity: MonitorIdentity::new("MON-PRIMARY"),
+                name: "Workstation Main Display".to_string(),
+                is_primary: true,
+            },
+        )
+        .expect("nurse firefox browser running");
+    let nurse_pid = nurse_process.pid();
+
+    // 2. Configure Window Hop queue profile with Firefox
+    let firefox_exe = create_mock_pe_executable(dir.path(), "firefox.exe", 0x8664);
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Antrian Poliklinik Mata Firefox",
+                firefox_exe.clone(),
+                r#"-private-window --kiosk "https://antrian.poli/mata?room=2""#,
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE-FIREFOX"))),
+        )
+        .expect("save firefox profile");
+
+    assert!(coordinator.can_activate(&profile_id).unwrap());
+
+    // 3. Activate Firefox profile
+    let activation_result = coordinator
+        .activate_profile(&profile_id)
+        .expect("activate firefox profile");
+
+    match activation_result {
+        ActivationResult::Launched {
+            pid,
+            target_monitor,
+            login_retention,
+        } => {
+            assert_ne!(
+                pid, nurse_pid,
+                "Firefox queue profile must have its own isolated PID and not merge with nurse browser"
+            );
+            assert_eq!(target_monitor, target_mon);
+
+            // Firefox private mode login retention note check
+            match login_retention {
+                window_hop::browsers::LoginRetentionNote::KioskOrInPrivateNoRetention {
+                    explanation,
+                } => {
+                    assert!(explanation.contains("Mozilla Firefox"));
+                    assert!(explanation.contains("privat"));
+                }
+                other => panic!("expected KioskOrInPrivateNoRetention, got: {:?}", other),
+            }
+
+            // Verify queue process launch plan
+            let launched = launcher.launched_processes();
+            assert_eq!(launched.len(), 2, "Nurse process + queue process");
+            let queue_proc = &launched[1];
+            assert_eq!(queue_proc.pid(), pid);
+            assert_eq!(queue_proc.current_monitor(), target_mon);
+
+            let expected_profile_dir = base_dir
+                .join("profiles")
+                .join(profile_id.as_str())
+                .join("browser_session");
+
+            // Isolation arguments: -no-remote and -profile <path>
+            let args = &queue_proc.plan().arguments;
+            assert_eq!(args[0], "-no-remote");
+            assert_eq!(args[1], "-profile");
+            assert_eq!(args[2], expected_profile_dir.to_string_lossy().to_string());
+
+            // Custom arguments: -private-window, --kiosk, URL
+            assert!(args.iter().any(|arg| arg == "-private-window"));
+            assert!(args.iter().any(|arg| arg == "--kiosk"));
+            assert!(
+                args.iter()
+                    .any(|arg| arg == "https://antrian.poli/mata?room=2"),
+                "Quoted URL parameter must be preserved intact"
+            );
+        }
+        other => panic!("expected Launched result, got: {:?}", other),
+    }
+
+    // 4. Repeated activation reuses window profil and restores placement without duplicate process
+    let reuse_result = coordinator
+        .activate_profile(&profile_id)
+        .expect("reactivate firefox profile");
+
+    match reuse_result {
+        ActivationResult::Reused {
+            pid,
+            target_monitor,
+            ..
+        } => {
+            assert_ne!(pid, nurse_pid);
+            assert_eq!(target_monitor, target_mon);
+            assert_eq!(
+                launcher.launched_processes().len(),
+                2,
+                "No new process spawned on reactivation"
+            );
+        }
+        other => panic!("expected Reused, got: {:?}", other),
+    }
+
+    // 5. Nurse's browser is still running and completely unaffected
+    assert!(
+        nurse_process.is_alive(),
+        "Nurse's working Firefox browser must remain running"
+    );
+}
+
+#[test]
+fn test_activate_profile_fails_when_firefox_custom_parameters_conflict() {
+    let dir = tempdir().expect("tempdir");
+    let store = Arc::new(MemoryProfileStore::new());
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE"),
+        name: "Queue Display".to_string(),
+        is_primary: false,
+    }]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = dir.path().join("base_data");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+
+    let firefox_exe = create_mock_pe_executable(dir.path(), "firefox.exe", 0x8664);
+
+    // Profile with conflicting -profile
+    let p_conflict1 = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Conflict Firefox 1",
+                firefox_exe.clone(),
+                r#"-profile "C:\CustomProfile""#,
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
+        )
+        .expect("save profile");
+
+    let err1 = coordinator.can_activate(&p_conflict1).unwrap_err();
+    match err1 {
+        ApplicationError::Browser(
+            window_hop::browsers::BrowserError::ConflictingIsolationParameter { arg, reason },
+        ) => {
+            assert!(arg.contains("-profile"));
+            assert!(reason.contains("direktori profil terisolasi"));
+        }
+        other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
+    }
+
+    // Profile with conflicting -P
+    let p_conflict2 = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Conflict Firefox 2",
+                firefox_exe.clone(),
+                r#"-P "InternalProfile""#,
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
+        )
+        .expect("save profile");
+
+    let err2 = coordinator.activate_profile(&p_conflict2).unwrap_err();
+    match err2 {
+        ApplicationError::Browser(
+            window_hop::browsers::BrowserError::ConflictingIsolationParameter { arg, reason },
+        ) => {
+            assert!(arg.contains("-P"));
+            assert!(reason.contains("-P"));
+        }
+        other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
+    }
+
+    // Profile with conflicting -no-remote
+    let p_conflict3 = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Conflict Firefox 3",
+                firefox_exe.clone(),
+                "-no-remote https://antrian.local",
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
+        )
+        .expect("save profile");
+
+    let err3 = coordinator.activate_profile(&p_conflict3).unwrap_err();
+    match err3 {
+        ApplicationError::Browser(
+            window_hop::browsers::BrowserError::ConflictingIsolationParameter { arg, reason },
+        ) => {
+            assert!(arg.contains("-no-remote"));
+            assert!(reason.contains("-no-remote"));
+        }
+        other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
+    }
+
+    // Profile with conflicting Chromium argument --user-data-dir
+    let p_conflict4 = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Conflict Firefox 4",
+                firefox_exe,
+                r#"--user-data-dir="C:\ChromeData""#,
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
+        )
+        .expect("save profile");
+
+    let err4 = coordinator.activate_profile(&p_conflict4).unwrap_err();
+    match err4 {
+        ApplicationError::Browser(
+            window_hop::browsers::BrowserError::ConflictingIsolationParameter { arg, reason },
+        ) => {
+            assert!(arg.contains("--user-data-dir"));
+            assert!(reason.contains("Chromium"));
+        }
+        other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
+    }
+
+    assert_eq!(launcher.launched_processes().len(), 0);
+}
+
+#[test]
+fn test_firefox_lifecycle_graceful_close_and_3s_deadline_force_stop_preserves_nurse_browser() {
+    let dir = tempdir().expect("tempdir");
+    let store = Arc::new(MemoryProfileStore::new());
+    let target_mon = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE"),
+        name: "Queue Display".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![
+        MonitorDescriptor {
+            identity: MonitorIdentity::new("MON-PRIMARY"),
+            name: "Workstation Main Display".to_string(),
+            is_primary: true,
+        },
+        target_mon.clone(),
+    ]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = dir.path().join("base_data");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock.clone(),
+        base_dir,
+    );
+
+    // Nurse Firefox process
+    let nurse_plan = window_hop::browsers::LaunchPlan {
+        executable: PathBuf::from(r"C:\Program Files\Mozilla Firefox\firefox.exe"),
+        arguments: vec!["https://hospital.simrs".to_string()],
+        user_data_dir: PathBuf::from(
+            r"C:\Users\Nurse\AppData\Roaming\Mozilla\Firefox\Profiles\nurse",
+        ),
+        login_retention: window_hop::browsers::LoginRetentionNote::SessionIsolated {
+            explanation: "Nurse".to_string(),
+        },
+    };
+    let nurse_proc = launcher
+        .launch(
+            &nurse_plan,
+            &MonitorDescriptor {
+                identity: MonitorIdentity::new("MON-PRIMARY"),
+                name: "Workstation Main Display".to_string(),
+                is_primary: true,
+            },
+        )
+        .expect("nurse process");
+
+    // Queue Firefox process with unresponsive behavior to test 3s deadline force stop
+    let firefox_exe = create_mock_pe_executable(dir.path(), "firefox.exe", 0x8664);
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new("Firefox Queue", firefox_exe, "https://antrian.poli/queue")
+                .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
+        )
+        .expect("save profile");
+
+    let act_res = coordinator.activate_profile(&profile_id).expect("activate");
+    let queue_pid = match act_res {
+        ActivationResult::Launched { pid, .. } => pid,
+        _ => panic!("expected Launched"),
+    };
+
+    // Configure queue process to refuse graceful close (simulate confirmation dialog hang)
+    let queue_proc = launcher.launched_processes()[1].clone();
+    queue_proc.set_refuse_graceful(true);
+
+    let t0 = clock.now();
+    let outcome = coordinator.stop_profile(&profile_id).expect("stop profile");
+    let t1 = clock.now();
+
+    // 1. Outcome must be Forced after 3 seconds
+    assert_eq!(outcome, StopOutcome::Forced { pid: queue_pid });
+    assert!(
+        t1.duration_since(t0) >= std::time::Duration::from_secs(3),
+        "Must wait for 3-second deadline before force stopping"
+    );
+
+    // 2. Queue process received close request first, then force stop
+    assert!(
+        queue_proc.close_requested(),
+        "Must have requested graceful close first"
+    );
+    assert!(
+        queue_proc.force_stopped(),
+        "Must have force stopped unresponsive process"
+    );
+    assert!(!queue_proc.is_alive());
+
+    // Nurse Firefox process must remain completely untouched!
+    assert!(
+        nurse_proc.is_alive(),
+        "Nurse's Firefox browser must NEVER be stopped or force-terminated"
+    );
+}
+
+#[test]
+fn test_firefox_profile_switching_on_same_monitor_stops_previous_before_launching_new() {
+    let dir = tempdir().expect("tempdir");
+    let store = Arc::new(MemoryProfileStore::new());
+    let target_mon = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE"),
+        name: "Queue Display".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![
+        MonitorDescriptor {
+            identity: MonitorIdentity::new("MON-PRIMARY"),
+            name: "Workstation Main Display".to_string(),
+            is_primary: true,
+        },
+        target_mon,
+    ]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = dir.path().join("base_data");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+
+    let firefox_exe = create_mock_pe_executable(dir.path(), "firefox.exe", 0x8664);
+
+    let p1 = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new("Firefox Poli 1", firefox_exe.clone(), "https://antrian/1")
+                .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
+        )
+        .expect("save p1");
+
+    let p2 = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new("Firefox Poli 2", firefox_exe, "https://antrian/2")
+                .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
+        )
+        .expect("save p2");
+
+    let act1 = coordinator.activate_profile(&p1).expect("activate p1");
+    let pid1 = match act1 {
+        ActivationResult::Launched { pid, .. } => pid,
+        _ => panic!("expected Launched p1"),
+    };
+
+    // Activate p2 on same monitor: must stop p1 before launching p2
+    let act2 = coordinator.activate_profile(&p2).expect("activate p2");
+    let pid2 = match act2 {
+        ActivationResult::Launched { pid, .. } => pid,
+        _ => panic!("expected Launched p2"),
+    };
+
+    assert_ne!(pid1, pid2);
+    let launched = launcher.launched_processes();
+    let proc1 = launched.iter().find(|p| p.pid() == pid1).unwrap();
+    let proc2 = launched.iter().find(|p| p.pid() == pid2).unwrap();
+
+    assert!(!proc1.is_alive(), "p1 Firefox instance must be stopped");
+    assert!(proc2.is_alive(), "p2 Firefox instance must be running");
+}
+
+#[test]
+fn test_shortcut_and_startup_activation_with_firefox() {
+    let dir = tempdir().expect("tempdir");
+    let store = Arc::new(MemoryProfileStore::new());
+    let target_mon = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE"),
+        name: "Queue Display".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![
+        MonitorDescriptor {
+            identity: MonitorIdentity::new("MON-PRIMARY"),
+            name: "Workstation Main Display".to_string(),
+            is_primary: true,
+        },
+        target_mon,
+    ]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = dir.path().join("base_data");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+    coordinator.set_startup_manager(Arc::new(MockStartupManager::new(false)));
+
+    let firefox_exe = create_mock_pe_executable(dir.path(), "firefox.exe", 0x8664);
+
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Shortcut Firefox",
+                firefox_exe,
+                r#"--kiosk "https://antrian/shortcut""#,
+            )
+            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
+        )
+        .expect("save profile");
+
+    // 1. Shortcut activation launches Firefox
     let shortcut_status = coordinator
         .handle_shortcut_activation(&profile_id)
         .expect("shortcut activation");

@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 use window_hop::browsers::{
-    detect_browser_support, evaluate_browser_compatibility, parse_windows_command_line,
-    read_executable_architecture, BrowserArchitecture, BrowserCompatibilityStatus, BrowserError,
-    BrowserSupportStatus, ChromeAdapter, EdgeAdapter, LoginRetentionNote,
+    detect_browser_support, evaluate_browser_compatibility, is_firefox_executable,
+    parse_windows_command_line, read_executable_architecture, BrowserArchitecture,
+    BrowserCompatibilityStatus, BrowserError, BrowserSupportStatus, ChromeAdapter, DetectedBrowser,
+    EdgeAdapter, FirefoxAdapter, LoginRetentionNote,
 };
 
 #[test]
@@ -322,11 +323,223 @@ fn test_chrome_adapter_login_retention_normal_mode() {
 }
 
 #[test]
-fn test_unverified_browser_is_rejected_with_informative_reason() {
-    // Firefox is unverified
+fn test_firefox_adapter_rejects_conflicting_session_isolation_arguments() {
+    let adapter = FirefoxAdapter::new();
+
+    // Valid arguments
+    let valid_args = ["--kiosk", "https://antrian.poli/mata", "-private-window"];
+    assert!(adapter.validate_parsed_arguments(&valid_args).is_ok());
+
+    // Conflicting: -profile
+    let err1 = adapter
+        .validate_parsed_arguments(&["-profile", "C:\\temp\\data"])
+        .unwrap_err();
+    match err1 {
+        BrowserError::ConflictingIsolationParameter { arg, reason } => {
+            assert!(arg.contains("-profile"));
+            assert!(reason.contains("direktori profil terisolasi"));
+        }
+        other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
+    }
+
+    // Conflicting: -profile=C:\temp
+    let err1b = adapter
+        .validate_parsed_arguments(&["--profile=C:\\temp"])
+        .unwrap_err();
+    match err1b {
+        BrowserError::ConflictingIsolationParameter { arg, .. } => {
+            assert!(arg.contains("--profile"));
+        }
+        other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
+    }
+
+    // Conflicting: -P / -p
+    let err2 = adapter
+        .validate_parsed_arguments(&["-P", "NurseProfile"])
+        .unwrap_err();
+    match err2 {
+        BrowserError::ConflictingIsolationParameter { arg, reason } => {
+            assert!(arg.contains("-P"));
+            assert!(reason.contains("-P"));
+        }
+        other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
+    }
+
+    let err2b = adapter
+        .validate_parsed_arguments(&["-p:NurseProfile"])
+        .unwrap_err();
+    match err2b {
+        BrowserError::ConflictingIsolationParameter { arg, .. } => {
+            assert!(arg.contains("-p"));
+        }
+        other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
+    }
+
+    // Conflicting: unspaced -P<name> (e.g. -Pnurse)
+    let err2c = adapter.validate_parsed_arguments(&["-Pnurse"]).unwrap_err();
+    match err2c {
+        BrowserError::ConflictingIsolationParameter { arg, reason } => {
+            assert!(arg.contains("-Pnurse"));
+            assert!(reason.contains("-P"));
+        }
+        other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
+    }
+
+    // Conflicting: -ProfileManager
+    let err3 = adapter
+        .validate_parsed_arguments(&["-ProfileManager"])
+        .unwrap_err();
+    match err3 {
+        BrowserError::ConflictingIsolationParameter { arg, reason } => {
+            assert!(arg.contains("-ProfileManager"));
+            assert!(reason.contains("Profile Manager"));
+        }
+        other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
+    }
+
+    // Conflicting: -CreateProfile
+    let err4 = adapter
+        .validate_parsed_arguments(&["-CreateProfile", "Nurse"])
+        .unwrap_err();
+    match err4 {
+        BrowserError::ConflictingIsolationParameter { arg, reason } => {
+            assert!(arg.contains("-CreateProfile"));
+            assert!(reason.contains("pembuatan profil"));
+        }
+        other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
+    }
+
+    // Conflicting: -no-remote
+    let err5 = adapter
+        .validate_parsed_arguments(&["-no-remote"])
+        .unwrap_err();
+    match err5 {
+        BrowserError::ConflictingIsolationParameter { arg, reason } => {
+            assert!(arg.contains("-no-remote"));
+            assert!(reason.contains("-no-remote"));
+        }
+        other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
+    }
+
+    // Conflicting Chromium arguments: --user-data-dir
+    let err6 = adapter
+        .validate_parsed_arguments(&["--user-data-dir=C:\\data"])
+        .unwrap_err();
+    match err6 {
+        BrowserError::ConflictingIsolationParameter { arg, reason } => {
+            assert!(arg.contains("--user-data-dir"));
+            assert!(reason.contains("Chromium"));
+        }
+        other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_firefox_adapter_generates_isolated_launch_plan_and_login_retention_note() {
+    let adapter = FirefoxAdapter::new();
+    assert_eq!(adapter.browser_name(), "Mozilla Firefox");
+
     let firefox_path = PathBuf::from(r"C:\Program Files\Mozilla Firefox\firefox.exe");
-    let support_firefox = detect_browser_support(&firefox_path);
-    assert_eq!(support_firefox, BrowserSupportStatus::Unverified);
+    let data_dir = PathBuf::from(r"C:\AppData\WindowHop\Profiles\p3\browser_session");
+
+    let plan = adapter
+        .build_launch_plan(
+            &firefox_path,
+            &data_dir,
+            r#"-private-window --kiosk "https://antrian.poli/mata""#,
+        )
+        .expect("build launch plan");
+
+    assert_eq!(plan.executable, firefox_path);
+    assert_eq!(plan.user_data_dir, data_dir);
+
+    // Verify Firefox isolation arguments: -no-remote -profile <path>
+    assert_eq!(plan.arguments[0], "-no-remote");
+    assert_eq!(plan.arguments[1], "-profile");
+    assert_eq!(
+        plan.arguments[2],
+        r"C:\AppData\WindowHop\Profiles\p3\browser_session"
+    );
+    assert!(plan.arguments.iter().any(|arg| arg == "-private-window"));
+    assert!(plan.arguments.iter().any(|arg| arg == "--kiosk"));
+    assert!(plan
+        .arguments
+        .iter()
+        .any(|arg| arg == "https://antrian.poli/mata"));
+
+    // Private mode does not retain login
+    match plan.login_retention {
+        LoginRetentionNote::KioskOrInPrivateNoRetention { explanation } => {
+            assert!(explanation.contains("Mozilla Firefox"));
+            assert!(explanation.contains("privat"));
+        }
+        other => panic!("expected KioskOrInPrivateNoRetention, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_firefox_adapter_login_retention_normal_and_kiosk_mode() {
+    let adapter = FirefoxAdapter::new();
+    let firefox_path = PathBuf::from(r"C:\Program Files\Mozilla Firefox\firefox.exe");
+    let data_dir = PathBuf::from(r"C:\AppData\WindowHop\Profiles\p3\browser_session");
+
+    // Normal mode: retains persistent session in isolated profile
+    let plan_normal = adapter
+        .build_launch_plan(&firefox_path, &data_dir, "https://antrian.poli/mata")
+        .expect("build normal launch plan");
+
+    match plan_normal.login_retention {
+        LoginRetentionNote::SessionIsolated { explanation } => {
+            assert!(explanation.contains("sesi browser profil"));
+            assert!(explanation.contains("terpisah dari browser kerja perawat"));
+        }
+        other => panic!("expected SessionIsolated, got: {:?}", other),
+    }
+
+    // Fullscreen kiosk mode (without private): retains persistent session in isolated profile
+    let plan_kiosk = adapter
+        .build_launch_plan(
+            &firefox_path,
+            &data_dir,
+            r#"--kiosk "https://antrian.poli/mata""#,
+        )
+        .expect("build kiosk launch plan");
+
+    match plan_kiosk.login_retention {
+        LoginRetentionNote::SessionIsolated { explanation } => {
+            assert!(explanation.contains("sesi browser profil"));
+            assert!(explanation.contains("terpisah dari browser kerja perawat"));
+        }
+        other => panic!("expected SessionIsolated, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_is_firefox_executable_and_detected_browser_is_verified() {
+    assert!(is_firefox_executable(&PathBuf::from("firefox.exe")));
+    assert!(is_firefox_executable(&PathBuf::from("firefox")));
+    assert!(is_firefox_executable(&PathBuf::from(
+        r"C:\Program Files\Mozilla Firefox\firefox.exe"
+    )));
+    assert!(!is_firefox_executable(&PathBuf::from("msedge.exe")));
+    assert!(!is_firefox_executable(&PathBuf::from("chrome.exe")));
+
+    let detected_firefox = DetectedBrowser {
+        name: "Mozilla Firefox".to_string(),
+        executable_path: PathBuf::from(r"C:\Program Files\Mozilla Firefox\firefox.exe"),
+        version: Some("120.0".to_string()),
+        architecture: BrowserArchitecture::X64,
+    };
+    assert!(detected_firefox.is_verified());
+}
+
+#[test]
+fn test_unverified_browser_is_rejected_with_informative_reason() {
+    // Brave is unverified
+    let brave_path =
+        PathBuf::from(r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe");
+    let support_brave = detect_browser_support(&brave_path);
+    assert_eq!(support_brave, BrowserSupportStatus::Unverified);
 
     let unknown_path = PathBuf::from(r"D:\Portable\CustomBrowser.exe");
     let support_unknown = detect_browser_support(&unknown_path);
@@ -484,21 +697,76 @@ fn test_evaluate_browser_compatibility_distinguishes_verified_unverified_and_una
         ),
     }
 
-    // 5. Unverified: Firefox x64 (detected/present on disk, but unverified adapter)
+    // 5. Verified: Firefox x64
     let firefox_exe = create_mock_pe_file(temp_dir.path(), "firefox.exe", 0x8664);
     let status_firefox = evaluate_browser_compatibility(&firefox_exe);
     match status_firefox {
+        BrowserCompatibilityStatus::SafeToActivate { adapter, evidence } => {
+            assert_eq!(adapter.browser_name(), "Mozilla Firefox");
+            assert_eq!(evidence.browser_name, "Mozilla Firefox");
+            assert_eq!(evidence.architecture, BrowserArchitecture::X64);
+            assert!(evidence.is_safe_to_activate);
+            assert!(evidence.evidence_text.contains("-no-remote -profile"));
+            assert!(evidence.evidence_text.contains("Windows 10/11 x64"));
+            assert!(evidence.limitations.as_ref().unwrap().contains("privat"));
+        }
+        other => panic!("expected SafeToActivate for Firefox x64, got {:?}", other),
+    }
+
+    // 5b. Verified: Firefox x86
+    let firefox_x86 = create_mock_pe_file(temp_dir.path(), "firefox_x86.exe", 0x014c);
+    let firefox_x86_named = temp_dir.path().join("firefox_32").join("firefox.exe");
+    std::fs::create_dir_all(firefox_x86_named.parent().expect("parent dir"))
+        .expect("create dir firefox_32");
+    std::fs::copy(&firefox_x86, &firefox_x86_named).expect("copy firefox_x86");
+    let status_firefox_x86 = evaluate_browser_compatibility(&firefox_x86_named);
+    match status_firefox_x86 {
+        BrowserCompatibilityStatus::SafeToActivate { evidence, .. } => {
+            assert_eq!(evidence.architecture, BrowserArchitecture::X86);
+            assert!(evidence.is_safe_to_activate);
+        }
+        other => panic!("expected SafeToActivate for Firefox x86, got {:?}", other),
+    }
+
+    // 5c. Blocked: Firefox with corrupt/non-PE binary on disk (unknown architecture)
+    let corrupt_firefox = temp_dir.path().join("corrupt_firefox").join("firefox.exe");
+    std::fs::create_dir_all(corrupt_firefox.parent().expect("parent dir"))
+        .expect("create dir corrupt_firefox");
+    std::fs::write(&corrupt_firefox, b"not a valid pe header").expect("write corrupt header");
+    let status_corrupt_firefox = evaluate_browser_compatibility(&corrupt_firefox);
+    match status_corrupt_firefox {
         BrowserCompatibilityStatus::Unverified { evidence } => {
             assert_eq!(evidence.browser_name, "Mozilla Firefox");
+            assert_eq!(evidence.architecture, BrowserArchitecture::Unknown);
+            assert!(!evidence.is_safe_to_activate);
+            assert!(evidence.evidence_text.contains("arsitektur"));
+            assert!(evidence
+                .limitations
+                .as_ref()
+                .unwrap()
+                .contains("Aktivasi diblokir"));
+        }
+        other => panic!(
+            "expected Unverified for corrupt Firefox binary, got {:?}",
+            other
+        ),
+    }
+
+    // 5d. Unverified: Brave x64 (detected/present on disk, but unverified adapter)
+    let brave_exe = create_mock_pe_file(temp_dir.path(), "brave.exe", 0x8664);
+    let status_brave = evaluate_browser_compatibility(&brave_exe);
+    match status_brave {
+        BrowserCompatibilityStatus::Unverified { evidence } => {
+            assert_eq!(evidence.browser_name, "Brave Browser");
             assert_eq!(evidence.architecture, BrowserArchitecture::X64);
             assert!(!evidence.is_safe_to_activate);
             assert!(evidence.evidence_text.contains("belum diverifikasi"));
             assert!(evidence.evidence_text.contains("disimpan"));
         }
-        other => panic!("expected Unverified for Firefox, got {:?}", other),
+        other => panic!("expected Unverified for Brave, got {:?}", other),
     }
 
-    // 5b. Unverified: Custom portable executable
+    // 5e. Unverified: Custom portable executable
     let portable_exe = create_mock_pe_file(temp_dir.path(), "portable_app.exe", 0x014c);
     let status_portable = evaluate_browser_compatibility(&portable_exe);
     match status_portable {
@@ -528,7 +796,30 @@ fn test_evaluate_browser_compatibility_distinguishes_verified_unverified_and_una
         ),
     }
 
-    // 6. Installed browser with sibling version folder (e.g. Edge Application\120.0.0.0)
+    // 6b. Installed Firefox with sibling application.ini version file
+    let firefox_app_dir = temp_dir.path().join("firefox_versioned");
+    std::fs::create_dir_all(&firefox_app_dir).expect("create firefox versioned dir");
+    let app_ini = firefox_app_dir.join("application.ini");
+    std::fs::write(
+        &app_ini,
+        "[App]\nVendor=Mozilla\nName=Firefox\nVersion=122.0.1\nBuildID=20240101\n",
+    )
+    .expect("write application.ini");
+    let firefox_versioned_exe = create_mock_pe_file(&firefox_app_dir, "firefox.exe", 0x8664);
+    let status_firefox_versioned = evaluate_browser_compatibility(&firefox_versioned_exe);
+    match status_firefox_versioned {
+        BrowserCompatibilityStatus::SafeToActivate { evidence, .. } => {
+            assert_eq!(evidence.version, Some("122.0.1".to_string()));
+            assert_eq!(evidence.architecture, BrowserArchitecture::X64);
+            assert!(evidence.is_safe_to_activate);
+        }
+        other => panic!(
+            "expected SafeToActivate with Firefox version, got {:?}",
+            other
+        ),
+    }
+
+    // 6c. Installed browser with sibling version folder (e.g. Edge Application\120.0.0.0)
     let app_dir = temp_dir.path().join("edge_versioned");
     let version_dir = app_dir.join("120.0.2210.144");
     std::fs::create_dir_all(&version_dir).unwrap();
