@@ -955,6 +955,11 @@ impl BrowserDetector for WindowsBrowserDetector {
                 "Brave Browser",
             ),
             (
+                prog_files_x86.as_ref(),
+                "BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+                "Brave Browser",
+            ),
+            (
                 local_app_data.as_ref(),
                 "BraveSoftware\\Brave-Browser\\Application\\brave.exe",
                 "Brave Browser",

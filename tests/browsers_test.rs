@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 use window_hop::browsers::{
-    detect_browser_support, evaluate_browser_compatibility, is_firefox_executable,
-    parse_windows_command_line, read_executable_architecture, BrowserArchitecture,
-    BrowserCompatibilityStatus, BrowserError, BrowserSupportStatus, ChromeAdapter, DetectedBrowser,
-    EdgeAdapter, FirefoxAdapter, LoginRetentionNote,
+    detect_browser_support, evaluate_browser_compatibility, is_brave_executable,
+    is_firefox_executable, parse_windows_command_line, read_executable_architecture, BraveAdapter,
+    BrowserArchitecture, BrowserCompatibilityStatus, BrowserError, BrowserSupportStatus,
+    ChromeAdapter, DetectedBrowser, EdgeAdapter, FirefoxAdapter, LoginRetentionNote,
 };
 
 #[test]
@@ -515,6 +515,161 @@ fn test_firefox_adapter_login_retention_normal_and_kiosk_mode() {
 }
 
 #[test]
+fn test_brave_adapter_rejects_conflicting_session_isolation_arguments() {
+    let adapter = BraveAdapter::new();
+
+    // Valid arguments
+    let valid_args = ["--kiosk", "https://antrian.poli/anak", "--incognito"];
+    assert!(adapter.validate_parsed_arguments(&valid_args).is_ok());
+
+    // Conflicting: --user-data-dir
+    let err1 = adapter
+        .validate_parsed_arguments(&["--user-data-dir=C:\\temp\\brave_data"])
+        .unwrap_err();
+    match err1 {
+        BrowserError::ConflictingIsolationParameter { arg, .. } => {
+            assert!(arg.contains("--user-data-dir"));
+        }
+        other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
+    }
+
+    // Conflicting: --profile-directory
+    let err2 = adapter
+        .validate_parsed_arguments(&["--profile-directory=Profile 1"])
+        .unwrap_err();
+    match err2 {
+        BrowserError::ConflictingIsolationParameter { arg, .. } => {
+            assert!(arg.contains("--profile-directory"));
+        }
+        other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
+    }
+
+    // Conflicting: case-insensitive & prefix-agnostic (/USER-DATA-DIR, -profile-directory)
+    let err3 = adapter
+        .validate_parsed_arguments(&["/USER-DATA-DIR=D:\\brave_data"])
+        .unwrap_err();
+    match err3 {
+        BrowserError::ConflictingIsolationParameter { arg, .. } => {
+            assert!(arg.contains("/USER-DATA-DIR"));
+        }
+        other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
+    }
+
+    let err4 = adapter
+        .validate_parsed_arguments(&["-profile-directory:Default"])
+        .unwrap_err();
+    match err4 {
+        BrowserError::ConflictingIsolationParameter { arg, .. } => {
+            assert!(arg.contains("-profile-directory"));
+        }
+        other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_brave_adapter_generates_isolated_launch_plan_and_login_retention_note() {
+    let brave_path =
+        PathBuf::from(r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe");
+    let adapter = BraveAdapter::new();
+    assert_eq!(adapter.browser_name(), "Brave Browser");
+
+    let data_dir = PathBuf::from(r"C:\AppData\WindowHop\Profiles\p_brave\browser_session");
+    let plan = adapter
+        .build_launch_plan(
+            &brave_path,
+            &data_dir,
+            r#"--incognito --kiosk "https://antrian.poli/anak""#,
+        )
+        .expect("build launch plan");
+
+    assert_eq!(plan.executable, brave_path);
+    assert!(
+        plan.arguments
+            .iter()
+            .any(|arg| arg
+                == r"--user-data-dir=C:\AppData\WindowHop\Profiles\p_brave\browser_session")
+    );
+    assert!(plan.arguments.iter().any(|arg| arg == "--incognito"));
+    assert!(plan.arguments.iter().any(|arg| arg == "--kiosk"));
+    assert!(plan
+        .arguments
+        .iter()
+        .any(|arg| arg == "https://antrian.poli/anak"));
+
+    // Login retention note checks: incognito prevents persistent login
+    match plan.login_retention {
+        LoginRetentionNote::KioskOrInPrivateNoRetention { explanation } => {
+            assert!(explanation.contains("Brave Browser"));
+            assert!(explanation.contains("incognito") || explanation.contains("Tor"));
+        }
+        other => panic!("expected KioskOrInPrivateNoRetention, got: {:?}", other),
+    }
+
+    // Also test --tor mode
+    let plan_tor = adapter
+        .build_launch_plan(
+            &brave_path,
+            &data_dir,
+            r#"--tor "https://antrian.poli/anak""#,
+        )
+        .expect("build tor launch plan");
+    match plan_tor.login_retention {
+        LoginRetentionNote::KioskOrInPrivateNoRetention { explanation } => {
+            assert!(explanation.contains("Brave Browser"));
+            assert!(explanation.contains("Tor") || explanation.contains("incognito"));
+        }
+        other => panic!(
+            "expected KioskOrInPrivateNoRetention for Tor, got: {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
+fn test_brave_adapter_kiosk_retains_persistent_login_when_not_incognito() {
+    let brave_path =
+        PathBuf::from(r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe");
+    let adapter = BraveAdapter::new();
+    let data_dir = PathBuf::from(r"C:\AppData\WindowHop\Profiles\p_brave\browser_session");
+
+    let plan = adapter
+        .build_launch_plan(
+            &brave_path,
+            &data_dir,
+            r#"--kiosk "https://antrian.poli/anak""#,
+        )
+        .expect("build launch plan");
+
+    match plan.login_retention {
+        LoginRetentionNote::SessionIsolated { explanation } => {
+            assert!(explanation.contains("sesi browser profil"));
+            assert!(explanation.contains("terpisah dari browser kerja perawat"));
+        }
+        other => panic!("expected SessionIsolated for Brave kiosk, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_brave_adapter_login_retention_normal_mode() {
+    let brave_path =
+        PathBuf::from(r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe");
+    let adapter = BraveAdapter::new();
+    let data_dir = PathBuf::from(r"C:\AppData\WindowHop\Profiles\p_brave\browser_session");
+
+    let plan = adapter
+        .build_launch_plan(&brave_path, &data_dir, "https://antrian.poli/anak")
+        .expect("build launch plan");
+
+    match plan.login_retention {
+        LoginRetentionNote::SessionIsolated { explanation } => {
+            assert!(explanation.contains("sesi browser profil"));
+            assert!(explanation.contains("terpisah dari browser kerja perawat"));
+        }
+        other => panic!("expected SessionIsolated, got: {:?}", other),
+    }
+}
+
+#[test]
 fn test_is_firefox_executable_and_detected_browser_is_verified() {
     assert!(is_firefox_executable(&PathBuf::from("firefox.exe")));
     assert!(is_firefox_executable(&PathBuf::from("firefox")));
@@ -523,6 +678,7 @@ fn test_is_firefox_executable_and_detected_browser_is_verified() {
     )));
     assert!(!is_firefox_executable(&PathBuf::from("msedge.exe")));
     assert!(!is_firefox_executable(&PathBuf::from("chrome.exe")));
+    assert!(!is_firefox_executable(&PathBuf::from("brave.exe")));
 
     let detected_firefox = DetectedBrowser {
         name: "Mozilla Firefox".to_string(),
@@ -534,12 +690,44 @@ fn test_is_firefox_executable_and_detected_browser_is_verified() {
 }
 
 #[test]
+fn test_is_brave_executable_and_detected_browser_is_verified() {
+    assert!(is_brave_executable(&PathBuf::from("brave.exe")));
+    assert!(is_brave_executable(&PathBuf::from("brave")));
+    assert!(is_brave_executable(&PathBuf::from(
+        r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
+    )));
+    assert!(!is_brave_executable(&PathBuf::from("msedge.exe")));
+    assert!(!is_brave_executable(&PathBuf::from("chrome.exe")));
+    assert!(!is_brave_executable(&PathBuf::from("firefox.exe")));
+
+    let detected_brave = DetectedBrowser {
+        name: "Brave Browser".to_string(),
+        executable_path: PathBuf::from(
+            r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+        ),
+        version: Some("1.62.153".to_string()),
+        architecture: BrowserArchitecture::X64,
+    };
+    assert!(detected_brave.is_verified());
+}
+
+#[test]
 fn test_unverified_browser_is_rejected_with_informative_reason() {
-    // Brave is unverified
+    // Brave is verified on simulated Windows or valid PE
     let brave_path =
         PathBuf::from(r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe");
     let support_brave = detect_browser_support(&brave_path);
-    assert_eq!(support_brave, BrowserSupportStatus::Unverified);
+    match support_brave {
+        BrowserSupportStatus::Verified(adapter) => {
+            assert_eq!(adapter.browser_name(), "Brave Browser");
+        }
+        BrowserSupportStatus::Unverified => panic!("Brave must be verified"),
+    }
+
+    // Opera or custom browser remains unverified
+    let opera_path = PathBuf::from(r"C:\Program Files\Opera\opera.exe");
+    let support_opera = detect_browser_support(&opera_path);
+    assert_eq!(support_opera, BrowserSupportStatus::Unverified);
 
     let unknown_path = PathBuf::from(r"D:\Portable\CustomBrowser.exe");
     let support_unknown = detect_browser_support(&unknown_path);
@@ -752,18 +940,62 @@ fn test_evaluate_browser_compatibility_distinguishes_verified_unverified_and_una
         ),
     }
 
-    // 5d. Unverified: Brave x64 (detected/present on disk, but unverified adapter)
+    // 5d. Verified: Brave x64
     let brave_exe = create_mock_pe_file(temp_dir.path(), "brave.exe", 0x8664);
     let status_brave = evaluate_browser_compatibility(&brave_exe);
     match status_brave {
-        BrowserCompatibilityStatus::Unverified { evidence } => {
+        BrowserCompatibilityStatus::SafeToActivate { adapter, evidence } => {
+            assert_eq!(adapter.browser_name(), "Brave Browser");
             assert_eq!(evidence.browser_name, "Brave Browser");
             assert_eq!(evidence.architecture, BrowserArchitecture::X64);
-            assert!(!evidence.is_safe_to_activate);
-            assert!(evidence.evidence_text.contains("belum diverifikasi"));
-            assert!(evidence.evidence_text.contains("disimpan"));
+            assert!(evidence.is_safe_to_activate);
+            assert!(evidence.evidence_text.contains("user-data-dir"));
+            assert!(evidence.evidence_text.contains("Windows 10/11 x64"));
+            assert!(
+                evidence.limitations.as_ref().unwrap().contains("incognito")
+                    || evidence.limitations.as_ref().unwrap().contains("Tor")
+            );
         }
-        other => panic!("expected Unverified for Brave, got {:?}", other),
+        other => panic!("expected SafeToActivate for Brave x64, got {:?}", other),
+    }
+
+    // 5d-2. Verified: Brave x86
+    let brave_x86 = create_mock_pe_file(temp_dir.path(), "brave_x86.exe", 0x014c);
+    let brave_x86_named = temp_dir.path().join("brave_32").join("brave.exe");
+    std::fs::create_dir_all(brave_x86_named.parent().expect("parent dir"))
+        .expect("create dir brave_32");
+    std::fs::copy(&brave_x86, &brave_x86_named).expect("copy brave_x86");
+    let status_brave_x86 = evaluate_browser_compatibility(&brave_x86_named);
+    match status_brave_x86 {
+        BrowserCompatibilityStatus::SafeToActivate { evidence, .. } => {
+            assert_eq!(evidence.architecture, BrowserArchitecture::X86);
+            assert!(evidence.is_safe_to_activate);
+        }
+        other => panic!("expected SafeToActivate for Brave x86, got {:?}", other),
+    }
+
+    // 5d-3. Blocked: Brave with corrupt/non-PE binary on disk (unknown architecture)
+    let corrupt_brave = temp_dir.path().join("corrupt_brave").join("brave.exe");
+    std::fs::create_dir_all(corrupt_brave.parent().expect("parent dir"))
+        .expect("create dir corrupt_brave");
+    std::fs::write(&corrupt_brave, b"not a valid pe header").expect("write corrupt brave header");
+    let status_corrupt_brave = evaluate_browser_compatibility(&corrupt_brave);
+    match status_corrupt_brave {
+        BrowserCompatibilityStatus::Unverified { evidence } => {
+            assert_eq!(evidence.browser_name, "Brave Browser");
+            assert_eq!(evidence.architecture, BrowserArchitecture::Unknown);
+            assert!(!evidence.is_safe_to_activate);
+            assert!(evidence.evidence_text.contains("arsitektur"));
+            assert!(evidence
+                .limitations
+                .as_ref()
+                .unwrap()
+                .contains("Aktivasi diblokir"));
+        }
+        other => panic!(
+            "expected Unverified for corrupt Brave binary, got {:?}",
+            other
+        ),
     }
 
     // 5e. Unverified: Custom portable executable

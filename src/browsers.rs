@@ -501,12 +501,90 @@ impl FirefoxAdapter {
     }
 }
 
-/// Adapter kemampuan browser terverifikasi (Edge, Chrome, atau Firefox).
+/// Adapter kemampuan browser untuk Brave Browser (Chromium).
+///
+/// Mengelola parameter isolasi sesi tersendiri (`--user-data-dir`) dan memvalidasi
+/// bahwa parameter kustom tidak berbenturan dengan isolasi profil.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BraveAdapter;
+
+impl BraveAdapter {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn browser_name(&self) -> &'static str {
+        "Brave Browser"
+    }
+
+    /// Memvalidasi parameter kustom terhadap parameter isolasi sesi yang dicadangkan.
+    pub fn validate_custom_parameters(
+        &self,
+        custom_parameters: &str,
+    ) -> Result<Vec<String>, BrowserError> {
+        let parsed = parse_windows_command_line(custom_parameters)?;
+        self.validate_parsed_arguments(&parsed)?;
+        Ok(parsed)
+    }
+
+    /// Memvalidasi daftar argumen yang telah diparsing.
+    pub fn validate_parsed_arguments<S: AsRef<str>>(&self, args: &[S]) -> Result<(), BrowserError> {
+        validate_chromium_arguments(args)
+    }
+
+    /// Menentukan catatan retensi sesi login berdasarkan argumen yang digunakan.
+    ///
+    /// Pada Brave Browser, mode fullscreen `--kiosk` tetap mempertahankan login dan cookie
+    /// dalam sesi browser profil (`--user-data-dir`) kecuali jika mode `--incognito` atau `--tor` diaktifkan.
+    pub fn evaluate_login_retention(&self, parsed_args: &[String]) -> LoginRetentionNote {
+        let is_incognito_or_tor = parsed_args.iter().any(|arg| {
+            let lower = arg.to_ascii_lowercase();
+            lower == "--incognito"
+                || lower == "-incognito"
+                || lower == "/incognito"
+                || lower.starts_with("--incognito=")
+                || lower == "--tor"
+                || lower == "-tor"
+                || lower == "/tor"
+                || lower.starts_with("--tor=")
+        });
+
+        if is_incognito_or_tor {
+            LoginRetentionNote::KioskOrInPrivateNoRetention {
+                explanation: "Mode incognito atau Tor pada Brave Browser tidak mempertahankan login persisten setelah jendela ditutup.".to_string(),
+            }
+        } else {
+            LoginRetentionNote::SessionIsolated {
+                explanation: "Login dan cookie disimpan tersendiri dalam sesi browser profil, terpisah dari browser kerja perawat.".to_string(),
+            }
+        }
+    }
+
+    /// Membangun rencana peluncuran browser dengan batas isolasi direktori data profil.
+    pub fn build_launch_plan(
+        &self,
+        executable: &Path,
+        profile_data_dir: &Path,
+        custom_parameters: &str,
+    ) -> Result<LaunchPlan, BrowserError> {
+        let parsed_custom = self.validate_custom_parameters(custom_parameters)?;
+        let login_retention = self.evaluate_login_retention(&parsed_custom);
+        build_chromium_launch_plan(
+            executable,
+            profile_data_dir,
+            custom_parameters,
+            login_retention,
+        )
+    }
+}
+
+/// Adapter kemampuan browser terverifikasi (Edge, Chrome, Firefox, atau Brave).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserAdapter {
     Edge(EdgeAdapter),
     Chrome(ChromeAdapter),
     Firefox(FirefoxAdapter),
+    Brave(BraveAdapter),
 }
 
 impl BrowserAdapter {
@@ -515,6 +593,7 @@ impl BrowserAdapter {
             Self::Edge(a) => a.browser_name(),
             Self::Chrome(a) => a.browser_name(),
             Self::Firefox(a) => a.browser_name(),
+            Self::Brave(a) => a.browser_name(),
         }
     }
 
@@ -526,6 +605,7 @@ impl BrowserAdapter {
             Self::Edge(a) => a.validate_custom_parameters(custom_parameters),
             Self::Chrome(a) => a.validate_custom_parameters(custom_parameters),
             Self::Firefox(a) => a.validate_custom_parameters(custom_parameters),
+            Self::Brave(a) => a.validate_custom_parameters(custom_parameters),
         }
     }
 
@@ -534,6 +614,7 @@ impl BrowserAdapter {
             Self::Edge(a) => a.validate_parsed_arguments(args),
             Self::Chrome(a) => a.validate_parsed_arguments(args),
             Self::Firefox(a) => a.validate_parsed_arguments(args),
+            Self::Brave(a) => a.validate_parsed_arguments(args),
         }
     }
 
@@ -542,6 +623,7 @@ impl BrowserAdapter {
             Self::Edge(a) => a.evaluate_login_retention(parsed_args),
             Self::Chrome(a) => a.evaluate_login_retention(parsed_args),
             Self::Firefox(a) => a.evaluate_login_retention(parsed_args),
+            Self::Brave(a) => a.evaluate_login_retention(parsed_args),
         }
     }
 
@@ -557,6 +639,7 @@ impl BrowserAdapter {
             Self::Firefox(a) => {
                 a.build_launch_plan(executable, profile_data_dir, custom_parameters)
             }
+            Self::Brave(a) => a.build_launch_plan(executable, profile_data_dir, custom_parameters),
         }
     }
 }
@@ -576,6 +659,12 @@ impl From<ChromeAdapter> for BrowserAdapter {
 impl From<FirefoxAdapter> for BrowserAdapter {
     fn from(adapter: FirefoxAdapter) -> Self {
         Self::Firefox(adapter)
+    }
+}
+
+impl From<BraveAdapter> for BrowserAdapter {
+    fn from(adapter: BraveAdapter) -> Self {
+        Self::Brave(adapter)
     }
 }
 
@@ -741,6 +830,12 @@ pub fn is_firefox_executable(executable: &Path) -> bool {
     file_name == "firefox.exe" || file_name == "firefox"
 }
 
+/// Memeriksa apakah file executable adalah Brave Browser.
+pub fn is_brave_executable(executable: &Path) -> bool {
+    let file_name = extract_executable_filename(executable);
+    file_name == "brave.exe" || file_name == "brave"
+}
+
 /// Mencoba membaca nomor versi browser dari direktori instalasi terkait jika tersedia.
 ///
 /// Mendukung struktur subfolder versi Chromium (Edge, Chrome) serta file `application.ini` / `platform.ini` (Mozilla Firefox).
@@ -785,6 +880,7 @@ impl DetectedBrowser {
         is_edge_executable(&self.executable_path)
             || is_chrome_executable(&self.executable_path)
             || is_firefox_executable(&self.executable_path)
+            || is_brave_executable(&self.executable_path)
     }
 }
 
@@ -807,7 +903,7 @@ fn is_executable_architecture_verified(executable: &Path, is_simulated_windows: 
     }
 }
 
-/// Mendeteksi apakah path executable merujuk ke browser yang terverifikasi (Edge, Chrome, atau Firefox).
+/// Mendeteksi apakah path executable merujuk ke browser yang terverifikasi (Edge, Chrome, Firefox, atau Brave).
 pub fn detect_browser_support(executable: &Path) -> BrowserSupportStatus {
     let path_str = executable.to_string_lossy();
     let is_simulated_windows =
@@ -823,6 +919,8 @@ pub fn detect_browser_support(executable: &Path) -> BrowserSupportStatus {
         BrowserSupportStatus::Verified(BrowserAdapter::Chrome(ChromeAdapter::new()))
     } else if is_firefox_executable(executable) {
         BrowserSupportStatus::Verified(BrowserAdapter::Firefox(FirefoxAdapter::new()))
+    } else if is_brave_executable(executable) {
+        BrowserSupportStatus::Verified(BrowserAdapter::Brave(BraveAdapter::new()))
     } else {
         BrowserSupportStatus::Unverified
     }
@@ -851,7 +949,6 @@ pub fn evaluate_browser_compatibility(executable: &Path) -> BrowserCompatibility
 
     let architecture = read_executable_architecture(executable);
     let version = read_installed_browser_version(executable);
-    let file_name = extract_executable_filename(executable);
 
     let is_verified_arch = architecture == BrowserArchitecture::X86
         || architecture == BrowserArchitecture::X64
@@ -935,16 +1032,38 @@ pub fn evaluate_browser_compatibility(executable: &Path) -> BrowserCompatibility
                 },
             }
         }
-    } else {
-        let browser_name = if file_name == "brave.exe" || file_name == "brave" {
-            "Brave Browser".to_string()
+    } else if is_brave_executable(executable) {
+        if !is_verified_arch {
+            BrowserCompatibilityStatus::Unverified {
+                evidence: BrowserSupportEvidence {
+                    browser_name: "Brave Browser".to_string(),
+                    version,
+                    architecture,
+                    is_safe_to_activate: false,
+                    evidence_text: "File executable biner Brave Browser memiliki arsitektur yang tidak didukung atau rusak; hanya x86 dan x64 pada Windows 10/11 x64 yang diverifikasi.".to_string(),
+                    limitations: Some("Aktivasi diblokir karena arsitektur executable belum diverifikasi.".to_string()),
+                },
+            }
         } else {
-            let stem = executable
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "Browser Portable".to_string());
-            format!("Browser {}", stem)
-        };
+            let adapter = BraveAdapter::new();
+            BrowserCompatibilityStatus::SafeToActivate {
+                adapter: BrowserAdapter::Brave(adapter),
+                evidence: BrowserSupportEvidence {
+                    browser_name: "Brave Browser".to_string(),
+                    version,
+                    architecture,
+                    is_safe_to_activate: true,
+                    evidence_text: "Dukungan pemisahan sesi browser profil (--user-data-dir) dan kepemilikan instance telah diverifikasi pada Windows 10/11 x64.".to_string(),
+                    limitations: Some("Mode incognito atau Tor tidak mempertahankan sesi login persisten.".to_string()),
+                },
+            }
+        }
+    } else {
+        let stem = executable
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Browser Portable".to_string());
+        let browser_name = format!("Browser {}", stem);
 
         BrowserCompatibilityStatus::Unverified {
             evidence: BrowserSupportEvidence {
