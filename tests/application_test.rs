@@ -6,15 +6,16 @@ use window_hop::application::{
     ActivationResult, ApplicationError, LifecycleCoordinator, LifecycleTransitionOutcome,
     StopOutcome,
 };
+use window_hop::browsers::{BrowserArchitecture, BrowserCompatibilityStatus};
 use window_hop::domain::{
     DraftProfileInput, ExitReason, MonitorDescriptor, MonitorIdentity, ProfileId,
     ProfileLifecycleState, ProfileStatus, TargetMonitorStatus,
 };
 use window_hop::persistence::{FileProfileStore, MemoryProfileStore, ProfileStore};
 use window_hop::platform::{
-    ActivationCommand, Clock, LocalSingleInstanceCoordinator, ManagedProcess, MockClock,
-    MockMonitorProvider, MockProcessLauncher, MockShortcutCreator, MockStartupManager,
-    MockTrayProvider, ProcessLauncher, SingleInstanceCoordinator,
+    ActivationCommand, Clock, DetectedBrowser, LocalSingleInstanceCoordinator, ManagedProcess,
+    MockBrowserDetector, MockClock, MockMonitorProvider, MockProcessLauncher, MockShortcutCreator,
+    MockStartupManager, MockTrayProvider, ProcessLauncher, SingleInstanceCoordinator,
 };
 
 #[test]
@@ -6253,4 +6254,206 @@ fn test_concurrent_shortcut_and_startup_activation_share_single_coordinator() {
         Some(ActivationResult::Reused { .. })
     ));
     assert_eq!(launcher.launched_processes().len(), 2);
+}
+
+fn create_mock_pe_executable(dir: &std::path::Path, filename: &str, machine: u16) -> PathBuf {
+    let file_path = dir.join(filename);
+    let mut data = vec![0u8; 256];
+    data[0] = b'M';
+    data[1] = b'Z';
+    let pe_offset: u32 = 0x80;
+    data[0x3C..0x40].copy_from_slice(&pe_offset.to_le_bytes());
+    data[0x80] = b'P';
+    data[0x81] = b'E';
+    data[0x82] = 0;
+    data[0x83] = 0;
+    data[0x84..0x86].copy_from_slice(&machine.to_le_bytes());
+    std::fs::write(&file_path, data).expect("write mock pe executable");
+    file_path
+}
+
+#[test]
+fn test_coordinator_detects_installed_browsers_and_handles_error() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let mut coordinator = LifecycleCoordinator::from_store(store);
+
+    let b1 = DetectedBrowser {
+        name: "Microsoft Edge".to_string(),
+        executable_path: PathBuf::from(
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        ),
+        version: Some("120.0.0.0".to_string()),
+        architecture: BrowserArchitecture::X64,
+    };
+    let b2 = DetectedBrowser {
+        name: "Google Chrome".to_string(),
+        executable_path: PathBuf::from(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+        version: Some("121.0.0.0".to_string()),
+        architecture: BrowserArchitecture::X86,
+    };
+
+    let detector = Arc::new(MockBrowserDetector::new(vec![b1.clone(), b2.clone()]));
+    coordinator.set_browser_detector(detector.clone());
+
+    let detected = coordinator.detected_browsers().expect("detected browsers");
+    assert_eq!(detected.len(), 2);
+    assert_eq!(detected[0], b1);
+    assert_eq!(detected[1], b2);
+
+    // Error handling
+    detector.set_error(Some("Gagal membaca registry".to_string()));
+    let err = coordinator.detected_browsers().unwrap_err();
+    assert!(err.to_string().contains("registry"));
+}
+
+#[test]
+fn test_save_and_reopen_profile_with_detected_or_portable_browser_and_check_compatibility() {
+    let dir = tempdir().expect("tempdir");
+    let file_path = dir.path().join("profiles.json");
+    let store1 = Arc::new(FileProfileStore::new(&file_path));
+    let mut app1 = LifecycleCoordinator::from_store(store1);
+
+    // Create a mock portable browser executable in tempdir
+    let portable_exe = create_mock_pe_executable(dir.path(), "my_portable_browser.exe", 0x014c); // x86
+    let edge_exe = create_mock_pe_executable(dir.path(), "msedge.exe", 0x8664); // x64
+
+    let p1_id = app1
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Profil Portable",
+                portable_exe.clone(),
+                "--app=https://antrian.local",
+            ),
+        )
+        .expect("save portable profile");
+
+    let p2_id = app1
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new(
+                "Profil Edge Terverifikasi",
+                edge_exe.clone(),
+                "--kiosk https://antrian.local",
+            ),
+        )
+        .expect("save edge profile");
+
+    // Reopen in a new coordinator instance (simulate restarting Window Hop)
+    let store2 = Arc::new(FileProfileStore::new(&file_path));
+    let mut app2 = LifecycleCoordinator::from_store(store2);
+    app2.load().expect("load profiles on reopen");
+
+    let p1 = app2.get_profile(&p1_id).expect("get p1");
+    assert_eq!(p1.browser_path(), &portable_exe);
+    let compat1 = app2.check_browser_compatibility(p1.browser_path());
+    match compat1 {
+        BrowserCompatibilityStatus::Unverified { evidence } => {
+            assert_eq!(evidence.architecture, BrowserArchitecture::X86);
+            assert!(!evidence.is_safe_to_activate);
+            assert!(evidence.evidence_text.contains("belum diverifikasi"));
+        }
+        other => panic!("expected Unverified, got {:?}", other),
+    }
+
+    let p2 = app2.get_profile(&p2_id).expect("get p2");
+    assert_eq!(p2.browser_path(), &edge_exe);
+    let compat2 = app2.check_browser_compatibility(p2.browser_path());
+    match compat2 {
+        BrowserCompatibilityStatus::SafeToActivate { adapter, evidence } => {
+            assert_eq!(adapter.browser_name(), "Microsoft Edge");
+            assert_eq!(evidence.architecture, BrowserArchitecture::X64);
+            assert!(evidence.is_safe_to_activate);
+            assert!(evidence.evidence_text.contains("user-data-dir"));
+        }
+        other => panic!("expected SafeToActivate, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_activate_profile_fails_when_browser_executable_missing_or_unavailable() {
+    let dir = tempdir().expect("tempdir");
+    let store = Arc::new(MemoryProfileStore::new());
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE"),
+        name: "Queue Display".to_string(),
+        is_primary: false,
+    }]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = dir.path().join("base_data");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+
+    let missing_path = dir.path().join("does_not_exist_msedge.exe");
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new("Antrian Edge Hilang", missing_path.clone(), "--kiosk")
+                .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
+        )
+        .expect("save profile");
+
+    let act_res = coordinator.activate_profile(&profile_id);
+    assert!(act_res.is_err());
+    match act_res.unwrap_err() {
+        ApplicationError::BrowserExecutableNotFound(path) => {
+            assert_eq!(path, missing_path);
+        }
+        err => panic!("expected BrowserExecutableNotFound, got: {:?}", err),
+    }
+    assert_eq!(launcher.launched_processes().len(), 0);
+}
+
+#[test]
+fn test_activate_profile_fails_when_browser_unverified_even_if_executable_exists_on_disk() {
+    let dir = tempdir().expect("tempdir");
+    let store = Arc::new(MemoryProfileStore::new());
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE"),
+        name: "Queue Display".to_string(),
+        is_primary: false,
+    }]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = dir.path().join("base_data");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+
+    // Create an existing Chrome executable on disk
+    let chrome_exe = create_mock_pe_executable(dir.path(), "chrome.exe", 0x8664);
+
+    let profile_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new("Antrian Chrome", chrome_exe.clone(), "--kiosk")
+                .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
+        )
+        .expect("save profile");
+
+    let can_res = coordinator.can_activate(&profile_id);
+    assert!(can_res.is_err());
+    match can_res.unwrap_err() {
+        ApplicationError::BrowserNotVerified(path, reason) => {
+            assert!(path.contains("chrome.exe"));
+            assert!(reason.contains("belum diverifikasi"));
+        }
+        err => panic!("expected BrowserNotVerified, got: {:?}", err),
+    }
+
+    let act_res = coordinator.activate_profile(&profile_id);
+    assert!(act_res.is_err());
+    assert_eq!(launcher.launched_processes().len(), 0);
 }
