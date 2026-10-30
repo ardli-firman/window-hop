@@ -151,7 +151,7 @@ const FIREFOX_CONFLICTING_PREFIXES: &[(&str, &str)] = &[
     ),
     (
         "-profilemanager",
-        "Window Hop mengelola profil sesi browser secara otomatis; Profile Manager dilarang",
+        "Window Hop mengelola sesi browser profil secara otomatis; Profile Manager dilarang",
     ),
     (
         "-createprofile",
@@ -171,8 +171,11 @@ const FIREFOX_CONFLICTING_PREFIXES: &[(&str, &str)] = &[
     ),
 ];
 
-/// Memvalidasi parameter baris perintah Chromium terhadap parameter isolasi sesi yang dicadangkan.
-fn validate_chromium_arguments<S: AsRef<str>>(args: &[S]) -> Result<(), BrowserError> {
+/// Helper umum untuk memvalidasi argumen terhadap awalan parameter isolasi yang dicadangkan.
+fn validate_conflicting_arguments<S: AsRef<str>>(
+    args: &[S],
+    prefixes: &[(&str, &str)],
+) -> Result<(), BrowserError> {
     for arg in args {
         let trimmed = arg.as_ref().trim();
         let lower = trimmed.to_ascii_lowercase();
@@ -181,7 +184,7 @@ fn validate_chromium_arguments<S: AsRef<str>>(args: &[S]) -> Result<(), BrowserE
             .or_else(|| lower.strip_prefix('-'))
             .or_else(|| lower.strip_prefix('/'));
         if let Some(arg_body) = normalized {
-            for &(prefix, reason) in CHROMIUM_CONFLICTING_PREFIXES {
+            for &(prefix, reason) in prefixes {
                 let clean_prefix = prefix.trim_start_matches('-');
                 if arg_body == clean_prefix
                     || arg_body.starts_with(&format!("{}=", clean_prefix))
@@ -198,8 +201,16 @@ fn validate_chromium_arguments<S: AsRef<str>>(args: &[S]) -> Result<(), BrowserE
     Ok(())
 }
 
+/// Memvalidasi parameter baris perintah Chromium terhadap parameter isolasi sesi yang dicadangkan.
+fn validate_chromium_arguments<S: AsRef<str>>(args: &[S]) -> Result<(), BrowserError> {
+    validate_conflicting_arguments(args, CHROMIUM_CONFLICTING_PREFIXES)
+}
+
 /// Memvalidasi parameter baris perintah Firefox terhadap parameter isolasi sesi yang dicadangkan.
 fn validate_firefox_arguments<S: AsRef<str>>(args: &[S]) -> Result<(), BrowserError> {
+    validate_conflicting_arguments(args, FIREFOX_CONFLICTING_PREFIXES)?;
+
+    // Periksa variasi unspaced -P<profile_name> (misal -Pnurse, /Pdefault) yang menunjuk ke profil Firefox internal
     for arg in args {
         let trimmed = arg.as_ref().trim();
         let lower = trimmed.to_ascii_lowercase();
@@ -208,17 +219,16 @@ fn validate_firefox_arguments<S: AsRef<str>>(args: &[S]) -> Result<(), BrowserEr
             .or_else(|| lower.strip_prefix('-'))
             .or_else(|| lower.strip_prefix('/'));
         if let Some(arg_body) = normalized {
-            for &(prefix, reason) in FIREFOX_CONFLICTING_PREFIXES {
-                let clean_prefix = prefix.trim_start_matches('-');
-                if arg_body == clean_prefix
-                    || arg_body.starts_with(&format!("{}=", clean_prefix))
-                    || arg_body.starts_with(&format!("{}:", clean_prefix))
-                {
-                    return Err(BrowserError::ConflictingIsolationParameter {
-                        arg: trimmed.to_string(),
-                        reason: reason.to_string(),
-                    });
-                }
+            if arg_body.starts_with('p')
+                && !arg_body.starts_with("profile")
+                && !arg_body.starts_with("private")
+                && !arg_body.starts_with("preferences")
+                && !arg_body.starts_with("purgecaches")
+            {
+                return Err(BrowserError::ConflictingIsolationParameter {
+                    arg: trimmed.to_string(),
+                    reason: "Window Hop menggunakan direktori profil tersendiri; parameter profil internal (-P) dilarang".to_string(),
+                });
             }
         }
     }
@@ -732,8 +742,12 @@ pub fn is_firefox_executable(executable: &Path) -> bool {
 }
 
 /// Mencoba membaca nomor versi browser dari direktori instalasi terkait jika tersedia.
+///
+/// Mendukung struktur subfolder versi Chromium (Edge, Chrome) serta file `application.ini` / `platform.ini` (Mozilla Firefox).
 pub fn read_installed_browser_version(executable: &Path) -> Option<String> {
     let parent = executable.parent()?;
+
+    // 1. Periksa format direktori berversi (Chromium / Edge / Chrome)
     if let Ok(entries) = std::fs::read_dir(parent) {
         for entry in entries.flatten() {
             if let Ok(file_type) = entry.file_type() {
@@ -748,6 +762,20 @@ pub fn read_installed_browser_version(executable: &Path) -> Option<String> {
             }
         }
     }
+
+    // 2. Periksa file application.ini atau platform.ini (Mozilla Firefox)
+    for ini_name in &["application.ini", "platform.ini"] {
+        let ini_path = parent.join(ini_name);
+        if let Ok(content) = std::fs::read_to_string(&ini_path) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if let Some(ver) = trimmed.strip_prefix("Version=") {
+                    return Some(ver.trim().to_string());
+                }
+            }
+        }
+    }
+
     None
 }
 

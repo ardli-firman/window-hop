@@ -375,6 +375,16 @@ fn test_firefox_adapter_rejects_conflicting_session_isolation_arguments() {
         other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
     }
 
+    // Conflicting: unspaced -P<name> (e.g. -Pnurse)
+    let err2c = adapter.validate_parsed_arguments(&["-Pnurse"]).unwrap_err();
+    match err2c {
+        BrowserError::ConflictingIsolationParameter { arg, reason } => {
+            assert!(arg.contains("-Pnurse"));
+            assert!(reason.contains("-P"));
+        }
+        other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
+    }
+
     // Conflicting: -ProfileManager
     let err3 = adapter
         .validate_parsed_arguments(&["-ProfileManager"])
@@ -706,8 +716,9 @@ fn test_evaluate_browser_compatibility_distinguishes_verified_unverified_and_una
     // 5b. Verified: Firefox x86
     let firefox_x86 = create_mock_pe_file(temp_dir.path(), "firefox_x86.exe", 0x014c);
     let firefox_x86_named = temp_dir.path().join("firefox_32").join("firefox.exe");
-    std::fs::create_dir_all(firefox_x86_named.parent().unwrap()).unwrap();
-    std::fs::copy(&firefox_x86, &firefox_x86_named).unwrap();
+    std::fs::create_dir_all(firefox_x86_named.parent().expect("parent dir"))
+        .expect("create dir firefox_32");
+    std::fs::copy(&firefox_x86, &firefox_x86_named).expect("copy firefox_x86");
     let status_firefox_x86 = evaluate_browser_compatibility(&firefox_x86_named);
     match status_firefox_x86 {
         BrowserCompatibilityStatus::SafeToActivate { evidence, .. } => {
@@ -719,8 +730,9 @@ fn test_evaluate_browser_compatibility_distinguishes_verified_unverified_and_una
 
     // 5c. Blocked: Firefox with corrupt/non-PE binary on disk (unknown architecture)
     let corrupt_firefox = temp_dir.path().join("corrupt_firefox").join("firefox.exe");
-    std::fs::create_dir_all(corrupt_firefox.parent().unwrap()).unwrap();
-    std::fs::write(&corrupt_firefox, b"not a valid pe header").unwrap();
+    std::fs::create_dir_all(corrupt_firefox.parent().expect("parent dir"))
+        .expect("create dir corrupt_firefox");
+    std::fs::write(&corrupt_firefox, b"not a valid pe header").expect("write corrupt header");
     let status_corrupt_firefox = evaluate_browser_compatibility(&corrupt_firefox);
     match status_corrupt_firefox {
         BrowserCompatibilityStatus::Unverified { evidence } => {
@@ -784,7 +796,30 @@ fn test_evaluate_browser_compatibility_distinguishes_verified_unverified_and_una
         ),
     }
 
-    // 6. Installed browser with sibling version folder (e.g. Edge Application\120.0.0.0)
+    // 6b. Installed Firefox with sibling application.ini version file
+    let firefox_app_dir = temp_dir.path().join("firefox_versioned");
+    std::fs::create_dir_all(&firefox_app_dir).expect("create firefox versioned dir");
+    let app_ini = firefox_app_dir.join("application.ini");
+    std::fs::write(
+        &app_ini,
+        "[App]\nVendor=Mozilla\nName=Firefox\nVersion=122.0.1\nBuildID=20240101\n",
+    )
+    .expect("write application.ini");
+    let firefox_versioned_exe = create_mock_pe_file(&firefox_app_dir, "firefox.exe", 0x8664);
+    let status_firefox_versioned = evaluate_browser_compatibility(&firefox_versioned_exe);
+    match status_firefox_versioned {
+        BrowserCompatibilityStatus::SafeToActivate { evidence, .. } => {
+            assert_eq!(evidence.version, Some("122.0.1".to_string()));
+            assert_eq!(evidence.architecture, BrowserArchitecture::X64);
+            assert!(evidence.is_safe_to_activate);
+        }
+        other => panic!(
+            "expected SafeToActivate with Firefox version, got {:?}",
+            other
+        ),
+    }
+
+    // 6c. Installed browser with sibling version folder (e.g. Edge Application\120.0.0.0)
     let app_dir = temp_dir.path().join("edge_versioned");
     let version_dir = app_dir.join("120.0.2210.144");
     std::fs::create_dir_all(&version_dir).unwrap();
