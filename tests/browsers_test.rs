@@ -250,11 +250,11 @@ fn test_chrome_adapter_generates_isolated_launch_plan_and_login_retention_note()
                 .iter()
                 .any(|arg| arg == "https://antrian.poli/mata"));
 
-            // Login retention note checks for incognito/kiosk
+            // Login retention note checks: incognito prevents persistent login
             match plan.login_retention {
                 LoginRetentionNote::KioskOrInPrivateNoRetention { explanation } => {
                     assert!(explanation.contains("Google Chrome"));
-                    assert!(explanation.contains("incognito") || explanation.contains("kiosk"));
+                    assert!(explanation.contains("incognito"));
                 }
                 other => panic!("expected KioskOrInPrivateNoRetention, got: {:?}", other),
             }
@@ -262,6 +262,38 @@ fn test_chrome_adapter_generates_isolated_launch_plan_and_login_retention_note()
         BrowserSupportStatus::Unverified => {
             panic!("Chrome should be verified");
         }
+    }
+}
+
+#[test]
+fn test_chrome_adapter_kiosk_retains_persistent_login_when_not_incognito() {
+    let chrome_path = PathBuf::from(r"C:\Program Files\Google\Chrome\Application\chrome.exe");
+    let support = detect_browser_support(&chrome_path);
+
+    match support {
+        BrowserSupportStatus::Verified(adapter) => {
+            let data_dir = PathBuf::from(r"C:\AppData\WindowHop\Profiles\p2\browser_session");
+            let plan = adapter
+                .build_launch_plan(
+                    &chrome_path,
+                    &data_dir,
+                    r#"--kiosk "https://antrian.poli/mata""#,
+                )
+                .expect("build launch plan");
+
+            // Unlike Edge, Chrome fullscreen kiosk without --incognito preserves persistent login in user-data-dir
+            match plan.login_retention {
+                LoginRetentionNote::SessionIsolated { explanation } => {
+                    assert!(explanation.contains("sesi browser profil"));
+                    assert!(explanation.contains("terpisah dari browser kerja perawat"));
+                }
+                other => panic!(
+                    "expected SessionIsolated for Chrome kiosk, got: {:?}",
+                    other
+                ),
+            }
+        }
+        BrowserSupportStatus::Unverified => panic!("Chrome must be verified"),
     }
 }
 

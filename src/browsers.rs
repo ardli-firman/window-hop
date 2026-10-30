@@ -129,6 +129,66 @@ pub struct LaunchPlan {
     pub login_retention: LoginRetentionNote,
 }
 
+const CHROMIUM_CONFLICTING_PREFIXES: &[(&str, &str)] = &[
+    (
+        "--user-data-dir",
+        "Window Hop secara otomatis mengelola direktori data terisolasi untuk setiap profil",
+    ),
+    (
+        "--profile-directory",
+        "Window Hop menggunakan profil sesi browser tersendiri; parameter profil internal dilarang",
+    ),
+];
+
+/// Memvalidasi parameter baris perintah Chromium terhadap parameter isolasi sesi yang dicadangkan.
+fn validate_chromium_arguments<S: AsRef<str>>(args: &[S]) -> Result<(), BrowserError> {
+    for arg in args {
+        let trimmed = arg.as_ref().trim();
+        let lower = trimmed.to_ascii_lowercase();
+        let normalized = lower
+            .strip_prefix("--")
+            .or_else(|| lower.strip_prefix('-'))
+            .or_else(|| lower.strip_prefix('/'));
+        if let Some(arg_body) = normalized {
+            for &(prefix, reason) in CHROMIUM_CONFLICTING_PREFIXES {
+                let clean_prefix = prefix.trim_start_matches('-');
+                if arg_body == clean_prefix
+                    || arg_body.starts_with(&format!("{}=", clean_prefix))
+                    || arg_body.starts_with(&format!("{}:", clean_prefix))
+                {
+                    return Err(BrowserError::ConflictingIsolationParameter {
+                        arg: trimmed.to_string(),
+                        reason: reason.to_string(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Membangun LaunchPlan Chromium dengan parameter isolasi sesi `--user-data-dir`.
+fn build_chromium_launch_plan(
+    executable: &Path,
+    profile_data_dir: &Path,
+    custom_parameters: &str,
+    login_retention: LoginRetentionNote,
+) -> Result<LaunchPlan, BrowserError> {
+    let parsed_custom = parse_windows_command_line(custom_parameters)?;
+    validate_chromium_arguments(&parsed_custom)?;
+
+    let mut arguments = Vec::new();
+    arguments.push(format!("--user-data-dir={}", profile_data_dir.display()));
+    arguments.extend(parsed_custom);
+
+    Ok(LaunchPlan {
+        executable: executable.to_path_buf(),
+        arguments,
+        user_data_dir: profile_data_dir.to_path_buf(),
+        login_retention,
+    })
+}
+
 /// Adapter kemampuan browser untuk Microsoft Edge (Chromium).
 ///
 /// Mengelola parameter isolasi sesi tersendiri (`--user-data-dir`) dan memvalidasi
@@ -137,17 +197,6 @@ pub struct LaunchPlan {
 pub struct EdgeAdapter;
 
 impl EdgeAdapter {
-    const CONFLICTING_PREFIXES: &'static [(&'static str, &'static str)] = &[
-        (
-            "--user-data-dir",
-            "Window Hop secara otomatis mengelola direktori data terisolasi untuk setiap profil",
-        ),
-        (
-            "--profile-directory",
-            "Window Hop menggunakan profil sesi browser tersendiri; parameter profil internal dilarang",
-        ),
-    ];
-
     pub fn new() -> Self {
         Self
     }
@@ -168,29 +217,7 @@ impl EdgeAdapter {
 
     /// Memvalidasi daftar argumen yang telah diparsing.
     pub fn validate_parsed_arguments<S: AsRef<str>>(&self, args: &[S]) -> Result<(), BrowserError> {
-        for arg in args {
-            let trimmed = arg.as_ref().trim();
-            let lower = trimmed.to_ascii_lowercase();
-            let normalized = lower
-                .strip_prefix("--")
-                .or_else(|| lower.strip_prefix('-'))
-                .or_else(|| lower.strip_prefix('/'));
-            if let Some(arg_body) = normalized {
-                for &(prefix, reason) in Self::CONFLICTING_PREFIXES {
-                    let clean_prefix = prefix.trim_start_matches('-');
-                    if arg_body == clean_prefix
-                        || arg_body.starts_with(&format!("{}=", clean_prefix))
-                        || arg_body.starts_with(&format!("{}:", clean_prefix))
-                    {
-                        return Err(BrowserError::ConflictingIsolationParameter {
-                            arg: trimmed.to_string(),
-                            reason: reason.to_string(),
-                        });
-                    }
-                }
-            }
-        }
-        Ok(())
+        validate_chromium_arguments(args)
     }
 
     /// Menentukan catatan retensi sesi login berdasarkan argumen yang digunakan.
@@ -223,19 +250,12 @@ impl EdgeAdapter {
     ) -> Result<LaunchPlan, BrowserError> {
         let parsed_custom = self.validate_custom_parameters(custom_parameters)?;
         let login_retention = self.evaluate_login_retention(&parsed_custom);
-
-        let mut arguments = Vec::new();
-        // Parameter isolasi sesi Chromium / Edge
-        arguments.push(format!("--user-data-dir={}", profile_data_dir.display()));
-        // Tambahkan parameter kustom pengguna
-        arguments.extend(parsed_custom);
-
-        Ok(LaunchPlan {
-            executable: executable.to_path_buf(),
-            arguments,
-            user_data_dir: profile_data_dir.to_path_buf(),
+        build_chromium_launch_plan(
+            executable,
+            profile_data_dir,
+            custom_parameters,
             login_retention,
-        })
+        )
     }
 }
 
@@ -247,17 +267,6 @@ impl EdgeAdapter {
 pub struct ChromeAdapter;
 
 impl ChromeAdapter {
-    const CONFLICTING_PREFIXES: &'static [(&'static str, &'static str)] = &[
-        (
-            "--user-data-dir",
-            "Window Hop secara otomatis mengelola direktori data terisolasi untuk setiap profil",
-        ),
-        (
-            "--profile-directory",
-            "Window Hop menggunakan profil sesi browser tersendiri; parameter profil internal dilarang",
-        ),
-    ];
-
     pub fn new() -> Self {
         Self
     }
@@ -278,45 +287,25 @@ impl ChromeAdapter {
 
     /// Memvalidasi daftar argumen yang telah diparsing.
     pub fn validate_parsed_arguments<S: AsRef<str>>(&self, args: &[S]) -> Result<(), BrowserError> {
-        for arg in args {
-            let trimmed = arg.as_ref().trim();
-            let lower = trimmed.to_ascii_lowercase();
-            let normalized = lower
-                .strip_prefix("--")
-                .or_else(|| lower.strip_prefix('-'))
-                .or_else(|| lower.strip_prefix('/'));
-            if let Some(arg_body) = normalized {
-                for &(prefix, reason) in Self::CONFLICTING_PREFIXES {
-                    let clean_prefix = prefix.trim_start_matches('-');
-                    if arg_body == clean_prefix
-                        || arg_body.starts_with(&format!("{}=", clean_prefix))
-                        || arg_body.starts_with(&format!("{}:", clean_prefix))
-                    {
-                        return Err(BrowserError::ConflictingIsolationParameter {
-                            arg: trimmed.to_string(),
-                            reason: reason.to_string(),
-                        });
-                    }
-                }
-            }
-        }
-        Ok(())
+        validate_chromium_arguments(args)
     }
 
     /// Menentukan catatan retensi sesi login berdasarkan argumen yang digunakan.
+    ///
+    /// Pada Google Chrome, mode fullscreen `--kiosk` tetap mempertahankan login dan cookie
+    /// dalam sesi browser profil (`--user-data-dir`) kecuali jika mode `--incognito` diaktifkan.
     pub fn evaluate_login_retention(&self, parsed_args: &[String]) -> LoginRetentionNote {
-        let is_kiosk_or_incognito = parsed_args.iter().any(|arg| {
+        let is_incognito = parsed_args.iter().any(|arg| {
             let lower = arg.to_ascii_lowercase();
-            lower == "--kiosk"
-                || lower.starts_with("--kiosk=")
-                || lower == "--incognito"
+            lower == "--incognito"
                 || lower == "-incognito"
                 || lower == "/incognito"
+                || lower.starts_with("--incognito=")
         });
 
-        if is_kiosk_or_incognito {
+        if is_incognito {
             LoginRetentionNote::KioskOrInPrivateNoRetention {
-                explanation: "Mode kiosk atau incognito pada Google Chrome tidak mempertahankan login persisten setelah jendela ditutup.".to_string(),
+                explanation: "Mode incognito pada Google Chrome tidak mempertahankan login persisten setelah jendela ditutup.".to_string(),
             }
         } else {
             LoginRetentionNote::SessionIsolated {
@@ -334,19 +323,12 @@ impl ChromeAdapter {
     ) -> Result<LaunchPlan, BrowserError> {
         let parsed_custom = self.validate_custom_parameters(custom_parameters)?;
         let login_retention = self.evaluate_login_retention(&parsed_custom);
-
-        let mut arguments = Vec::new();
-        // Parameter isolasi sesi Chromium / Chrome
-        arguments.push(format!("--user-data-dir={}", profile_data_dir.display()));
-        // Tambahkan parameter kustom pengguna
-        arguments.extend(parsed_custom);
-
-        Ok(LaunchPlan {
-            executable: executable.to_path_buf(),
-            arguments,
-            user_data_dir: profile_data_dir.to_path_buf(),
+        build_chromium_launch_plan(
+            executable,
+            profile_data_dir,
+            custom_parameters,
             login_retention,
-        })
+        )
     }
 }
 
@@ -606,27 +588,29 @@ pub enum BrowserSupportStatus {
     Unverified,
 }
 
+/// Memeriksa apakah arsitektur executable terverifikasi (x86 atau x64).
+fn is_executable_architecture_verified(executable: &Path, is_simulated_windows: bool) -> bool {
+    if executable.exists() && executable.is_file() {
+        let arch = read_executable_architecture(executable);
+        arch == BrowserArchitecture::X86 || arch == BrowserArchitecture::X64 || is_simulated_windows
+    } else {
+        true
+    }
+}
+
 /// Mendeteksi apakah path executable merujuk ke browser yang terverifikasi (Edge atau Chrome).
 pub fn detect_browser_support(executable: &Path) -> BrowserSupportStatus {
     let path_str = executable.to_string_lossy();
     let is_simulated_windows =
         cfg!(not(windows)) && (path_str.starts_with("C:") || path_str.starts_with("c:"));
 
+    if !is_executable_architecture_verified(executable, is_simulated_windows) {
+        return BrowserSupportStatus::Unverified;
+    }
+
     if is_edge_executable(executable) {
-        if executable.exists() && executable.is_file() {
-            let arch = read_executable_architecture(executable);
-            if arch == BrowserArchitecture::Unknown && !is_simulated_windows {
-                return BrowserSupportStatus::Unverified;
-            }
-        }
         BrowserSupportStatus::Verified(BrowserAdapter::Edge(EdgeAdapter::new()))
     } else if is_chrome_executable(executable) {
-        if executable.exists() && executable.is_file() {
-            let arch = read_executable_architecture(executable);
-            if arch == BrowserArchitecture::Unknown && !is_simulated_windows {
-                return BrowserSupportStatus::Unverified;
-            }
-        }
         BrowserSupportStatus::Verified(BrowserAdapter::Chrome(ChromeAdapter::new()))
     } else {
         BrowserSupportStatus::Unverified
@@ -710,7 +694,7 @@ pub fn evaluate_browser_compatibility(executable: &Path) -> BrowserCompatibility
                     architecture,
                     is_safe_to_activate: true,
                     evidence_text: "Dukungan pemisahan sesi browser profil (--user-data-dir) dan kepemilikan instance telah diverifikasi pada Windows 10/11 x64.".to_string(),
-                    limitations: Some("Mode kiosk atau incognito tidak mempertahankan sesi login persisten.".to_string()),
+                    limitations: Some("Mode incognito tidak mempertahankan sesi login persisten.".to_string()),
                 },
             }
         }
