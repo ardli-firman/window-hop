@@ -806,20 +806,35 @@ pub trait StartupManager: Send + Sync {
     /// Jika `enabled` bernilai true, aplikasi didaftarkan dengan flag `--startup`.
     /// Jika `enabled` bernilai false, pendaftaran dicabut.
     fn set_startup_registered(&self, enabled: bool) -> Result<(), PlatformError>;
+
+    /// Mengatur path executable aplikasi yang digunakan untuk pendaftaran startup OS.
+    fn set_app_executable(&self, _app_exe: PathBuf) {}
 }
 
 /// Implementasi tiruan (mock) dari StartupManager untuk pengujian unit deterministik.
 pub struct MockStartupManager {
     is_registered: AtomicBool,
+    registered_exe: Mutex<Option<PathBuf>>,
     error: Mutex<Option<String>>,
+    app_exe: Mutex<Option<PathBuf>>,
 }
 
 impl MockStartupManager {
     pub fn new(initial: bool) -> Self {
         Self {
             is_registered: AtomicBool::new(initial),
+            registered_exe: Mutex::new(None),
             error: Mutex::new(None),
+            app_exe: Mutex::new(None),
         }
+    }
+
+    pub fn set_app_exe(&self, exe: Option<PathBuf>) {
+        *self.app_exe.lock().unwrap() = exe;
+    }
+
+    pub fn registered_executable(&self) -> Option<PathBuf> {
+        self.registered_exe.lock().unwrap().clone()
     }
 
     pub fn set_error(&self, error: Option<String>) {
@@ -850,7 +865,22 @@ impl StartupManager for MockStartupManager {
             return Err(PlatformError::Os(err.clone()));
         }
         self.is_registered.store(enabled, Ordering::SeqCst);
+        if enabled {
+            let exe = self
+                .app_exe
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("window-hop.exe"));
+            *self.registered_exe.lock().unwrap() = Some(exe);
+        } else {
+            *self.registered_exe.lock().unwrap() = None;
+        }
         Ok(())
+    }
+
+    fn set_app_executable(&self, app_exe: PathBuf) {
+        *self.app_exe.lock().unwrap() = Some(app_exe);
     }
 }
 
