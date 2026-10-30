@@ -140,6 +140,37 @@ const CHROMIUM_CONFLICTING_PREFIXES: &[(&str, &str)] = &[
     ),
 ];
 
+const FIREFOX_CONFLICTING_PREFIXES: &[(&str, &str)] = &[
+    (
+        "-profile",
+        "Window Hop secara otomatis mengelola direktori profil terisolasi untuk setiap profil",
+    ),
+    (
+        "-p",
+        "Window Hop menggunakan direktori profil tersendiri; parameter profil internal (-P) dilarang",
+    ),
+    (
+        "-profilemanager",
+        "Window Hop mengelola profil sesi browser secara otomatis; Profile Manager dilarang",
+    ),
+    (
+        "-createprofile",
+        "Window Hop mengelola direktori profil tersendiri; pembuatan profil internal dilarang",
+    ),
+    (
+        "-no-remote",
+        "Window Hop secara otomatis mengelola parameter isolasi '-no-remote' untuk setiap profil",
+    ),
+    (
+        "--user-data-dir",
+        "Parameter '--user-data-dir' adalah parameter Chromium; Firefox menggunakan parameter isolasi profil tersendiri (-profile)",
+    ),
+    (
+        "--profile-directory",
+        "Parameter '--profile-directory' adalah parameter Chromium; Firefox menggunakan parameter isolasi profil tersendiri (-profile)",
+    ),
+];
+
 /// Memvalidasi parameter baris perintah Chromium terhadap parameter isolasi sesi yang dicadangkan.
 fn validate_chromium_arguments<S: AsRef<str>>(args: &[S]) -> Result<(), BrowserError> {
     for arg in args {
@@ -151,6 +182,33 @@ fn validate_chromium_arguments<S: AsRef<str>>(args: &[S]) -> Result<(), BrowserE
             .or_else(|| lower.strip_prefix('/'));
         if let Some(arg_body) = normalized {
             for &(prefix, reason) in CHROMIUM_CONFLICTING_PREFIXES {
+                let clean_prefix = prefix.trim_start_matches('-');
+                if arg_body == clean_prefix
+                    || arg_body.starts_with(&format!("{}=", clean_prefix))
+                    || arg_body.starts_with(&format!("{}:", clean_prefix))
+                {
+                    return Err(BrowserError::ConflictingIsolationParameter {
+                        arg: trimmed.to_string(),
+                        reason: reason.to_string(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Memvalidasi parameter baris perintah Firefox terhadap parameter isolasi sesi yang dicadangkan.
+fn validate_firefox_arguments<S: AsRef<str>>(args: &[S]) -> Result<(), BrowserError> {
+    for arg in args {
+        let trimmed = arg.as_ref().trim();
+        let lower = trimmed.to_ascii_lowercase();
+        let normalized = lower
+            .strip_prefix("--")
+            .or_else(|| lower.strip_prefix('-'))
+            .or_else(|| lower.strip_prefix('/'));
+        if let Some(arg_body) = normalized {
+            for &(prefix, reason) in FIREFOX_CONFLICTING_PREFIXES {
                 let clean_prefix = prefix.trim_start_matches('-');
                 if arg_body == clean_prefix
                     || arg_body.starts_with(&format!("{}=", clean_prefix))
@@ -179,6 +237,30 @@ fn build_chromium_launch_plan(
 
     let mut arguments = Vec::new();
     arguments.push(format!("--user-data-dir={}", profile_data_dir.display()));
+    arguments.extend(parsed_custom);
+
+    Ok(LaunchPlan {
+        executable: executable.to_path_buf(),
+        arguments,
+        user_data_dir: profile_data_dir.to_path_buf(),
+        login_retention,
+    })
+}
+
+/// Membangun LaunchPlan Firefox dengan parameter isolasi sesi `-no-remote -profile <path>`.
+fn build_firefox_launch_plan(
+    executable: &Path,
+    profile_data_dir: &Path,
+    custom_parameters: &str,
+    login_retention: LoginRetentionNote,
+) -> Result<LaunchPlan, BrowserError> {
+    let parsed_custom = parse_windows_command_line(custom_parameters)?;
+    validate_firefox_arguments(&parsed_custom)?;
+
+    let mut arguments = Vec::new();
+    arguments.push("-no-remote".to_string());
+    arguments.push("-profile".to_string());
+    arguments.push(profile_data_dir.to_string_lossy().to_string());
     arguments.extend(parsed_custom);
 
     Ok(LaunchPlan {
@@ -332,11 +414,89 @@ impl ChromeAdapter {
     }
 }
 
-/// Adapter kemampuan browser terverifikasi (Edge atau Chrome).
+/// Adapter kemampuan browser untuk Mozilla Firefox.
+///
+/// Mengelola parameter isolasi sesi tersendiri (`-no-remote -profile <path>`) dan memvalidasi
+/// bahwa parameter kustom tidak berbenturan dengan isolasi profil.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FirefoxAdapter;
+
+impl FirefoxAdapter {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn browser_name(&self) -> &'static str {
+        "Mozilla Firefox"
+    }
+
+    /// Memvalidasi parameter kustom terhadap parameter isolasi sesi yang dicadangkan.
+    pub fn validate_custom_parameters(
+        &self,
+        custom_parameters: &str,
+    ) -> Result<Vec<String>, BrowserError> {
+        let parsed = parse_windows_command_line(custom_parameters)?;
+        self.validate_parsed_arguments(&parsed)?;
+        Ok(parsed)
+    }
+
+    /// Memvalidasi daftar argumen yang telah diparsing.
+    pub fn validate_parsed_arguments<S: AsRef<str>>(&self, args: &[S]) -> Result<(), BrowserError> {
+        validate_firefox_arguments(args)
+    }
+
+    /// Menentukan catatan retensi sesi login berdasarkan argumen yang digunakan.
+    ///
+    /// Pada Mozilla Firefox, mode fullscreen `--kiosk` tetap mempertahankan login dan cookie
+    /// dalam sesi browser profil (`-profile`) kecuali jika mode privat (`-private` atau `-private-window`) diaktifkan.
+    pub fn evaluate_login_retention(&self, parsed_args: &[String]) -> LoginRetentionNote {
+        let is_private = parsed_args.iter().any(|arg| {
+            let lower = arg.to_ascii_lowercase();
+            lower == "-private"
+                || lower == "--private"
+                || lower == "/private"
+                || lower == "-private-window"
+                || lower == "--private-window"
+                || lower == "/private-window"
+                || lower.starts_with("-private-window=")
+                || lower.starts_with("--private-window=")
+        });
+
+        if is_private {
+            LoginRetentionNote::KioskOrInPrivateNoRetention {
+                explanation: "Mode privat pada Mozilla Firefox tidak mempertahankan login persisten setelah jendela ditutup.".to_string(),
+            }
+        } else {
+            LoginRetentionNote::SessionIsolated {
+                explanation: "Login dan cookie disimpan tersendiri dalam sesi browser profil, terpisah dari browser kerja perawat.".to_string(),
+            }
+        }
+    }
+
+    /// Membangun rencana peluncuran browser dengan batas isolasi direktori data profil.
+    pub fn build_launch_plan(
+        &self,
+        executable: &Path,
+        profile_data_dir: &Path,
+        custom_parameters: &str,
+    ) -> Result<LaunchPlan, BrowserError> {
+        let parsed_custom = self.validate_custom_parameters(custom_parameters)?;
+        let login_retention = self.evaluate_login_retention(&parsed_custom);
+        build_firefox_launch_plan(
+            executable,
+            profile_data_dir,
+            custom_parameters,
+            login_retention,
+        )
+    }
+}
+
+/// Adapter kemampuan browser terverifikasi (Edge, Chrome, atau Firefox).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserAdapter {
     Edge(EdgeAdapter),
     Chrome(ChromeAdapter),
+    Firefox(FirefoxAdapter),
 }
 
 impl BrowserAdapter {
@@ -344,6 +504,7 @@ impl BrowserAdapter {
         match self {
             Self::Edge(a) => a.browser_name(),
             Self::Chrome(a) => a.browser_name(),
+            Self::Firefox(a) => a.browser_name(),
         }
     }
 
@@ -354,6 +515,7 @@ impl BrowserAdapter {
         match self {
             Self::Edge(a) => a.validate_custom_parameters(custom_parameters),
             Self::Chrome(a) => a.validate_custom_parameters(custom_parameters),
+            Self::Firefox(a) => a.validate_custom_parameters(custom_parameters),
         }
     }
 
@@ -361,6 +523,7 @@ impl BrowserAdapter {
         match self {
             Self::Edge(a) => a.validate_parsed_arguments(args),
             Self::Chrome(a) => a.validate_parsed_arguments(args),
+            Self::Firefox(a) => a.validate_parsed_arguments(args),
         }
     }
 
@@ -368,6 +531,7 @@ impl BrowserAdapter {
         match self {
             Self::Edge(a) => a.evaluate_login_retention(parsed_args),
             Self::Chrome(a) => a.evaluate_login_retention(parsed_args),
+            Self::Firefox(a) => a.evaluate_login_retention(parsed_args),
         }
     }
 
@@ -380,6 +544,9 @@ impl BrowserAdapter {
         match self {
             Self::Edge(a) => a.build_launch_plan(executable, profile_data_dir, custom_parameters),
             Self::Chrome(a) => a.build_launch_plan(executable, profile_data_dir, custom_parameters),
+            Self::Firefox(a) => {
+                a.build_launch_plan(executable, profile_data_dir, custom_parameters)
+            }
         }
     }
 }
@@ -393,6 +560,12 @@ impl From<EdgeAdapter> for BrowserAdapter {
 impl From<ChromeAdapter> for BrowserAdapter {
     fn from(adapter: ChromeAdapter) -> Self {
         Self::Chrome(adapter)
+    }
+}
+
+impl From<FirefoxAdapter> for BrowserAdapter {
+    fn from(adapter: FirefoxAdapter) -> Self {
+        Self::Firefox(adapter)
     }
 }
 
@@ -552,6 +725,12 @@ pub fn is_chrome_executable(executable: &Path) -> bool {
     file_name == "chrome.exe" || file_name == "chrome"
 }
 
+/// Memeriksa apakah file executable adalah Mozilla Firefox.
+pub fn is_firefox_executable(executable: &Path) -> bool {
+    let file_name = extract_executable_filename(executable);
+    file_name == "firefox.exe" || file_name == "firefox"
+}
+
 /// Mencoba membaca nomor versi browser dari direktori instalasi terkait jika tersedia.
 pub fn read_installed_browser_version(executable: &Path) -> Option<String> {
     let parent = executable.parent()?;
@@ -575,7 +754,9 @@ pub fn read_installed_browser_version(executable: &Path) -> Option<String> {
 impl DetectedBrowser {
     /// Memeriksa apakah browser terdeteksi memiliki adapter yang terverifikasi dan aman diaktifkan.
     pub fn is_verified(&self) -> bool {
-        is_edge_executable(&self.executable_path) || is_chrome_executable(&self.executable_path)
+        is_edge_executable(&self.executable_path)
+            || is_chrome_executable(&self.executable_path)
+            || is_firefox_executable(&self.executable_path)
     }
 }
 
@@ -598,7 +779,7 @@ fn is_executable_architecture_verified(executable: &Path, is_simulated_windows: 
     }
 }
 
-/// Mendeteksi apakah path executable merujuk ke browser yang terverifikasi (Edge atau Chrome).
+/// Mendeteksi apakah path executable merujuk ke browser yang terverifikasi (Edge, Chrome, atau Firefox).
 pub fn detect_browser_support(executable: &Path) -> BrowserSupportStatus {
     let path_str = executable.to_string_lossy();
     let is_simulated_windows =
@@ -612,6 +793,8 @@ pub fn detect_browser_support(executable: &Path) -> BrowserSupportStatus {
         BrowserSupportStatus::Verified(BrowserAdapter::Edge(EdgeAdapter::new()))
     } else if is_chrome_executable(executable) {
         BrowserSupportStatus::Verified(BrowserAdapter::Chrome(ChromeAdapter::new()))
+    } else if is_firefox_executable(executable) {
+        BrowserSupportStatus::Verified(BrowserAdapter::Firefox(FirefoxAdapter::new()))
     } else {
         BrowserSupportStatus::Unverified
     }
@@ -698,10 +881,34 @@ pub fn evaluate_browser_compatibility(executable: &Path) -> BrowserCompatibility
                 },
             }
         }
+    } else if is_firefox_executable(executable) {
+        if !is_verified_arch {
+            BrowserCompatibilityStatus::Unverified {
+                evidence: BrowserSupportEvidence {
+                    browser_name: "Mozilla Firefox".to_string(),
+                    version,
+                    architecture,
+                    is_safe_to_activate: false,
+                    evidence_text: "File executable biner Mozilla Firefox memiliki arsitektur yang tidak didukung atau rusak; hanya x86 dan x64 pada Windows 10/11 x64 yang diverifikasi.".to_string(),
+                    limitations: Some("Aktivasi diblokir karena arsitektur executable belum diverifikasi.".to_string()),
+                },
+            }
+        } else {
+            let adapter = FirefoxAdapter::new();
+            BrowserCompatibilityStatus::SafeToActivate {
+                adapter: BrowserAdapter::Firefox(adapter),
+                evidence: BrowserSupportEvidence {
+                    browser_name: "Mozilla Firefox".to_string(),
+                    version,
+                    architecture,
+                    is_safe_to_activate: true,
+                    evidence_text: "Dukungan pemisahan sesi browser profil (-no-remote -profile) dan kepemilikan instance telah diverifikasi pada Windows 10/11 x64.".to_string(),
+                    limitations: Some("Mode privat tidak mempertahankan sesi login persisten.".to_string()),
+                },
+            }
+        }
     } else {
-        let browser_name = if file_name == "firefox.exe" || file_name == "firefox" {
-            "Mozilla Firefox".to_string()
-        } else if file_name == "brave.exe" || file_name == "brave" {
+        let browser_name = if file_name == "brave.exe" || file_name == "brave" {
             "Brave Browser".to_string()
         } else {
             let stem = executable
