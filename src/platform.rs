@@ -483,6 +483,7 @@ pub enum ActivationCommand {
     ActivateProfile(ProfileId),
     OpenSettings,
     Ping,
+    Startup,
 }
 
 /// Seam antarmuka koordinasi single-instance dan transmisi aktivasi antar-proses.
@@ -795,12 +796,70 @@ impl TrayProvider for MockTrayProvider {
     }
 }
 
+/// Seam antarmuka manajemen konfigurasi startup otomatis saat login OS.
+pub trait StartupManager: Send + Sync {
+    /// Memeriksa apakah aplikasi terdaftar untuk mulai otomatis saat login OS.
+    fn is_startup_registered(&self) -> Result<bool, PlatformError>;
+
+    /// Mendaftarkan atau mencabut pendaftaran aplikasi untuk mulai otomatis saat login OS.
+    /// Jika `enabled` bernilai true, aplikasi didaftarkan dengan flag `--startup`.
+    /// Jika `enabled` bernilai false, pendaftaran dicabut.
+    fn set_startup_registered(&self, enabled: bool) -> Result<(), PlatformError>;
+}
+
+/// Implementasi tiruan (mock) dari StartupManager untuk pengujian unit deterministik.
+pub struct MockStartupManager {
+    is_registered: AtomicBool,
+    error: Mutex<Option<String>>,
+}
+
+impl MockStartupManager {
+    pub fn new(initial: bool) -> Self {
+        Self {
+            is_registered: AtomicBool::new(initial),
+            error: Mutex::new(None),
+        }
+    }
+
+    pub fn set_error(&self, error: Option<String>) {
+        *self.error.lock().unwrap() = error;
+    }
+
+    pub fn is_registered(&self) -> bool {
+        self.is_registered.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for MockStartupManager {
+    fn default() -> Self {
+        Self::new(false)
+    }
+}
+
+impl StartupManager for MockStartupManager {
+    fn is_startup_registered(&self) -> Result<bool, PlatformError> {
+        if let Some(ref err) = *self.error.lock().unwrap() {
+            return Err(PlatformError::Os(err.clone()));
+        }
+        Ok(self.is_registered.load(Ordering::SeqCst))
+    }
+
+    fn set_startup_registered(&self, enabled: bool) -> Result<(), PlatformError> {
+        if let Some(ref err) = *self.error.lock().unwrap() {
+            return Err(PlatformError::Os(err.clone()));
+        }
+        self.is_registered.store(enabled, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 #[cfg(windows)]
 pub mod windows;
 
 #[cfg(windows)]
 pub use windows::{
-    WindowsMonitorProvider, WindowsProcessLauncher, WindowsShortcutCreator, WindowsTrayProvider,
+    WindowsMonitorProvider, WindowsProcessLauncher, WindowsShortcutCreator, WindowsStartupManager,
+    WindowsTrayProvider,
 };
 
 #[cfg(not(windows))]
@@ -875,6 +934,23 @@ impl TrayProvider for NonWindowsTrayProvider {
     }
 }
 
+#[cfg(not(windows))]
+/// Substitut pengelola startup untuk lingkungan non-Windows.
+pub struct NonWindowsStartupManager;
+
+#[cfg(not(windows))]
+impl StartupManager for NonWindowsStartupManager {
+    fn is_startup_registered(&self) -> Result<bool, PlatformError> {
+        Ok(false)
+    }
+
+    fn set_startup_registered(&self, _enabled: bool) -> Result<(), PlatformError> {
+        Err(PlatformError::Unsupported(
+            "Pendaftaran startup otomatis native hanya tersedia pada platform Windows.".to_string(),
+        ))
+    }
+}
+
 /// Mengembalikan penyedia monitor default untuk platform saat ini.
 pub fn default_monitor_provider() -> Arc<dyn MonitorProvider> {
     #[cfg(windows)]
@@ -929,5 +1005,18 @@ pub fn default_tray_provider() -> Arc<dyn TrayProvider> {
     #[cfg(not(windows))]
     {
         Arc::new(NonWindowsTrayProvider)
+    }
+}
+
+/// Mengembalikan pengelola startup default untuk platform saat ini.
+pub fn default_startup_manager() -> Arc<dyn StartupManager> {
+    #[cfg(windows)]
+    {
+        Arc::new(WindowsStartupManager::new())
+    }
+
+    #[cfg(not(windows))]
+    {
+        Arc::new(NonWindowsStartupManager)
     }
 }

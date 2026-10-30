@@ -23,6 +23,8 @@ pub struct WindowHopView {
     cached_lifecycle_states: HashMap<ProfileId, ProfileLifecycleState>,
     cached_running_ids: HashSet<ProfileId>,
     cached_has_running_changes: HashSet<ProfileId>,
+    cached_startup_enabled: bool,
+    cached_startup_profile_id: Option<ProfileId>,
     is_busy: bool,
     selected_profile_id: Option<ProfileId>,
     selected_target_monitor: Option<MonitorIdentity>,
@@ -68,7 +70,14 @@ impl WindowHopView {
                 .placeholder("Default: Desktop (atau masukkan jalur folder alternatif)")
         });
 
-        let (initial_error, cached_monitors, monitors_error, cached_profiles) = {
+        let (
+            initial_error,
+            cached_monitors,
+            monitors_error,
+            cached_profiles,
+            cached_startup_enabled,
+            cached_startup_profile_id,
+        ) = {
             let coord = coordinator.lock().unwrap();
             let initial_error = coord.last_error().map(|s| s.to_string());
             let (monitors, m_err) = match coord.available_monitors() {
@@ -76,7 +85,16 @@ impl WindowHopView {
                 Err(e) => (Vec::new(), Some(e.to_string())),
             };
             let profiles = coord.list_profiles();
-            (initial_error, monitors, m_err, profiles)
+            let startup_enabled = coord.startup_enabled();
+            let startup_profile_id = coord.startup_profile_id().cloned();
+            (
+                initial_error,
+                monitors,
+                m_err,
+                profiles,
+                startup_enabled,
+                startup_profile_id,
+            )
         };
 
         let is_error = initial_error.is_some();
@@ -113,6 +131,8 @@ impl WindowHopView {
             cached_lifecycle_states,
             cached_running_ids,
             cached_has_running_changes,
+            cached_startup_enabled,
+            cached_startup_profile_id,
             is_busy: false,
             selected_profile_id: None,
             selected_target_monitor: None,
@@ -132,6 +152,8 @@ impl WindowHopView {
     /// Menyinkronkan cache tampilan lokal dari instance koordinator.
     fn sync_cache_from_coordinator(&mut self, coord: &LifecycleCoordinator) {
         self.cached_profiles = coord.list_profiles();
+        self.cached_startup_enabled = coord.startup_enabled();
+        self.cached_startup_profile_id = coord.startup_profile_id().cloned();
         self.cached_lifecycle_states = self
             .cached_profiles
             .iter()
@@ -780,6 +802,82 @@ impl WindowHopView {
         })
         .detach();
     }
+
+    /// Mengaktifkan atau menonaktifkan startup otomatis saat login Windows.
+    pub fn toggle_startup_enabled(&mut self, cx: &mut Context<Self>) {
+        let coordinator_arc = self.coordinator.clone();
+        let target_enabled = !self.cached_startup_enabled;
+
+        match coordinator_arc
+            .lock()
+            .unwrap()
+            .set_startup_enabled(target_enabled)
+        {
+            Ok(()) => {
+                if let Ok(coord) = coordinator_arc.try_lock() {
+                    self.sync_cache_from_coordinator(&coord);
+                }
+                self.status_message = Some(if target_enabled {
+                    "Startup Windows diaktifkan: Window Hop akan berjalan otomatis di system tray setelah login.".to_string()
+                } else {
+                    "Startup Windows dinonaktifkan: Window Hop tidak akan berjalan otomatis pada login berikutnya.".to_string()
+                });
+                self.is_error = false;
+            }
+            Err(err) => {
+                let err_msg = err.to_string();
+                if let Ok(coord) = coordinator_arc.try_lock() {
+                    self.sync_cache_from_coordinator(&coord);
+                }
+                self.status_message =
+                    Some(format!("Gagal mengubah pengaturan startup: {}", err_msg));
+                self.is_error = true;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Mengatur atau membatalkan profil yang dipilih sebagai profil startup.
+    pub fn set_startup_profile(&mut self, profile_id: Option<ProfileId>, cx: &mut Context<Self>) {
+        let coordinator_arc = self.coordinator.clone();
+
+        match coordinator_arc
+            .lock()
+            .unwrap()
+            .set_startup_profile_id(profile_id.clone())
+        {
+            Ok(()) => {
+                if let Ok(coord) = coordinator_arc.try_lock() {
+                    self.sync_cache_from_coordinator(&coord);
+                }
+                self.status_message = Some(match profile_id {
+                    Some(ref pid) => {
+                        let name = self
+                            .cached_profiles
+                            .iter()
+                            .find(|p| p.id() == pid)
+                            .map(|p| p.name())
+                            .unwrap_or("Profil");
+                        format!(
+                            "Profil '{}' dipilih sebagai profil startup setelah login.",
+                            name
+                        )
+                    }
+                    None => "Pilihan profil startup dibatalkan.".to_string(),
+                });
+                self.is_error = false;
+            }
+            Err(err) => {
+                let err_msg = err.to_string();
+                if let Ok(coord) = coordinator_arc.try_lock() {
+                    self.sync_cache_from_coordinator(&coord);
+                }
+                self.status_message = Some(format!("Gagal mengatur profil startup: {}", err_msg));
+                self.is_error = true;
+            }
+        }
+        cx.notify();
+    }
 }
 
 impl Render for WindowHopView {
@@ -1002,11 +1100,29 @@ impl Render for WindowHopView {
                                                                 .justify_between()
                                                                 .items_center()
                                                                 .child(
-                                                                    div()
-                                                                        .font_weight(
-                                                                            FontWeight::MEDIUM,
+                                                                    h_flex()
+                                                                        .gap_1p5()
+                                                                        .items_center()
+                                                                        .child(
+                                                                            div()
+                                                                                .font_weight(
+                                                                                    FontWeight::MEDIUM,
+                                                                                )
+                                                                                .child(p.name().to_string()),
                                                                         )
-                                                                        .child(p.name().to_string()),
+                                                                        .when(Some(p.id()) == self.cached_startup_profile_id.as_ref(), |this| {
+                                                                            this.child(
+                                                                                div()
+                                                                                    .text_xs()
+                                                                                    .px_1p5()
+                                                                                    .py_0p5()
+                                                                                    .rounded_sm()
+                                                                                    .bg(theme.warning.opacity(0.18))
+                                                                                    .text_color(theme.warning)
+                                                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                                                    .child("★ Startup"),
+                                                                            )
+                                                                        }),
                                                                 )
                                                                 .child(
                                                                     div()
@@ -1042,6 +1158,74 @@ impl Render for WindowHopView {
                                         }))
                                         .into_any_element()
                                 },
+                            )
+                            // Bagian Pengaturan Mulai Otomatis (Startup Windows)
+                            .child(
+                                v_flex()
+                                    .p_3()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(theme.muted.opacity(0.3))
+                                    .gap_2()
+                                    .child(
+                                        h_flex()
+                                            .justify_between()
+                                            .items_center()
+                                            .child(
+                                                v_flex()
+                                                    .gap_0p5()
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .font_weight(FontWeight::BOLD)
+                                                            .child("Mulai Otomatis (Startup Windows)"),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(if self.cached_startup_enabled {
+                                                                theme.primary
+                                                            } else {
+                                                                theme.muted_foreground
+                                                            })
+                                                            .child(if self.cached_startup_enabled {
+                                                                "Status: Aktif di Tray"
+                                                            } else {
+                                                                "Status: Nonaktif"
+                                                            }),
+                                                    ),
+                                            )
+                                            .child(
+                                                Button::new("btn-toggle-startup")
+                                                    .label(if self.cached_startup_enabled {
+                                                        "Nonaktifkan"
+                                                    } else {
+                                                        "Aktifkan"
+                                                    })
+                                                    .disabled(is_busy)
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.toggle_startup_enabled(cx);
+                                                    })),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(match &self.cached_startup_profile_id {
+                                                Some(pid) => {
+                                                    let name = self
+                                                        .cached_profiles
+                                                        .iter()
+                                                        .find(|p| p.id() == pid)
+                                                        .map(|p| p.name())
+                                                        .unwrap_or("Tidak ditemukan");
+                                                    format!("Profil Startup: {}", name)
+                                                }
+                                                None => "Profil Startup: (Belum dipilih)".to_string(),
+                                            }),
+                                    ),
                             ),
                     )
                     // Kolom Kanan: Formulir Detail Profil
@@ -1481,6 +1665,73 @@ impl Render for WindowHopView {
                                                                 })),
                                                         ),
                                                 ),
+                                        ),
+                                )
+                            })
+                            // Pilihan Profil Startup untuk Profil ini
+                            .when_some(self.selected_profile_id.as_ref(), |this, pid| {
+                                let is_this_startup = self.cached_startup_profile_id.as_ref() == Some(pid);
+                                let pid_clone = pid.clone();
+                                this.child(
+                                    h_flex()
+                                        .justify_between()
+                                        .items_center()
+                                        .p_2p5()
+                                        .rounded_md()
+                                        .bg(if is_this_startup {
+                                            theme.warning.opacity(0.12)
+                                        } else {
+                                            theme.muted.opacity(0.2)
+                                        })
+                                        .border_1()
+                                        .border_color(if is_this_startup {
+                                            theme.warning
+                                        } else {
+                                            theme.border
+                                        })
+                                        .child(
+                                            v_flex()
+                                                .gap_0p5()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .child("Pengaturan Profil Startup:"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(if is_this_startup {
+                                                            theme.warning
+                                                        } else {
+                                                            theme.muted_foreground
+                                                        })
+                                                        .child(if is_this_startup {
+                                                            "★ Profil ini dipilih untuk berjalan otomatis setelah login Windows"
+                                                        } else {
+                                                            "Bukan profil startup saat ini"
+                                                        }),
+                                                ),
+                                        )
+                                        .child(
+                                            Button::new(if is_this_startup {
+                                                "btn-unset-startup-profile"
+                                            } else {
+                                                "btn-set-startup-profile"
+                                            })
+                                            .label(if is_this_startup {
+                                                "Batalkan Profil Startup"
+                                            } else {
+                                                "Jadikan Profil Startup"
+                                            })
+                                            .disabled(is_busy)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                if is_this_startup {
+                                                    this.set_startup_profile(None, cx);
+                                                } else {
+                                                    this.set_startup_profile(Some(pid_clone.clone()), cx);
+                                                }
+                                            })),
                                         ),
                                 )
                             })

@@ -387,6 +387,10 @@ impl Profile {
 pub struct AppConfig {
     schema_version: u32,
     profiles: Vec<Profile>,
+    #[serde(default)]
+    startup_enabled: bool,
+    #[serde(default)]
+    startup_profile_id: Option<ProfileId>,
 }
 
 impl AppConfig {
@@ -395,6 +399,23 @@ impl AppConfig {
         Self {
             schema_version,
             profiles,
+            startup_enabled: false,
+            startup_profile_id: None,
+        }
+    }
+
+    /// Membuat konfigurasi baru dengan pengaturan startup eksplisit.
+    pub fn with_startup(
+        schema_version: u32,
+        profiles: Vec<Profile>,
+        startup_enabled: bool,
+        startup_profile_id: Option<ProfileId>,
+    ) -> Self {
+        Self {
+            schema_version,
+            profiles,
+            startup_enabled,
+            startup_profile_id,
         }
     }
 
@@ -412,6 +433,26 @@ impl AppConfig {
     pub(crate) fn profiles_mut(&mut self) -> &mut Vec<Profile> {
         &mut self.profiles
     }
+
+    /// Memeriksa apakah startup otomatis setelah login diaktifkan.
+    pub fn startup_enabled(&self) -> bool {
+        self.startup_enabled
+    }
+
+    /// Mengatur status aktif/nonaktif startup otomatis setelah login.
+    pub fn set_startup_enabled(&mut self, enabled: bool) {
+        self.startup_enabled = enabled;
+    }
+
+    /// Mengambil ID profil startup yang dipilih jika ada.
+    pub fn startup_profile_id(&self) -> Option<&ProfileId> {
+        self.startup_profile_id.as_ref()
+    }
+
+    /// Mengatur ID profil startup yang dipilih.
+    pub fn set_startup_profile_id(&mut self, id: Option<ProfileId>) {
+        self.startup_profile_id = id;
+    }
 }
 
 impl Default for AppConfig {
@@ -419,6 +460,8 @@ impl Default for AppConfig {
         Self {
             schema_version: 1,
             profiles: Vec::new(),
+            startup_enabled: false,
+            startup_profile_id: None,
         }
     }
 }

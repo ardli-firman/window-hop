@@ -347,3 +347,47 @@ fn test_local_single_instance_coordinator_handles_ping_command() {
     assert_eq!(cmds.len(), 1);
     assert_eq!(cmds[0], ActivationCommand::Ping);
 }
+
+#[test]
+fn test_local_single_instance_coordinator_handles_startup_command() {
+    let dir = tempdir().expect("tempdir");
+    let primary = LocalSingleInstanceCoordinator::new(dir.path().to_path_buf());
+
+    let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let received_clone = received.clone();
+    primary
+        .start_listener(Box::new(move |cmd| {
+            received_clone.lock().unwrap().push(cmd);
+        }))
+        .expect("start listener");
+
+    let secondary = LocalSingleInstanceCoordinator::new(dir.path().to_path_buf());
+    let sent = secondary
+        .send_activation(&ActivationCommand::Startup)
+        .expect("send startup command");
+    assert!(sent, "Startup command must be received by running primary");
+
+    std::thread::sleep(Duration::from_millis(100));
+    let cmds = received.lock().unwrap().clone();
+    assert_eq!(cmds.len(), 1);
+    assert_eq!(cmds[0], ActivationCommand::Startup);
+}
+
+#[test]
+fn test_mock_startup_manager_lifecycle_and_error_handling() {
+    use window_hop::platform::{MockStartupManager, StartupManager};
+
+    let manager = MockStartupManager::new(false);
+    assert!(!manager.is_startup_registered().unwrap());
+
+    manager.set_startup_registered(true).unwrap();
+    assert!(manager.is_startup_registered().unwrap());
+
+    manager.set_startup_registered(false).unwrap();
+    assert!(!manager.is_startup_registered().unwrap());
+
+    // Error simulation
+    manager.set_error(Some("Access denied to registry".to_string()));
+    assert!(manager.is_startup_registered().is_err());
+    assert!(manager.set_startup_registered(true).is_err());
+}

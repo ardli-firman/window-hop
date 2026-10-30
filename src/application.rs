@@ -9,8 +9,9 @@ use crate::domain::{
 use crate::persistence::{PersistenceError, ProfileStore};
 use crate::platform::{
     default_clock, default_monitor_provider, default_process_launcher, default_shortcut_creator,
-    default_tray_provider, Clock, ManagedProcess, MonitorProvider, PlatformError, ProcessLauncher,
-    ShortcutCreator, ShortcutSpec, TrayProvider, ACTIVATE_PROFILE_FLAG,
+    default_startup_manager, default_tray_provider, Clock, ManagedProcess, MonitorProvider,
+    PlatformError, ProcessLauncher, ShortcutCreator, ShortcutSpec, StartupManager, TrayProvider,
+    ACTIVATE_PROFILE_FLAG,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -135,6 +136,9 @@ pub enum ApplicationError {
     #[error("Profil dengan ID {id} tidak ditemukan")]
     ProfileNotFound { id: ProfileId },
 
+    #[error("Profil startup belum dipilih atau referensi profil tidak valid: {0}")]
+    InvalidStartupProfileReference(String),
+
     #[error("Penyimpanan dicegah karena data konfigurasi sebelumnya rusak atau gagal dimuat: {0}")]
     BlockedByCorruptState(String),
 
@@ -166,6 +170,7 @@ pub struct LifecycleCoordinator {
     clock: Arc<dyn Clock>,
     shortcut_creator: Arc<dyn ShortcutCreator>,
     tray_provider: Arc<dyn TrayProvider>,
+    startup_manager: Arc<dyn StartupManager>,
     base_data_dir: PathBuf,
     config: AppConfig,
     active_instances: HashMap<ProfileId, ActiveProfileInstance>,
@@ -190,6 +195,7 @@ impl LifecycleCoordinator {
             clock,
             shortcut_creator: default_shortcut_creator(),
             tray_provider: default_tray_provider(),
+            startup_manager: default_startup_manager(),
             base_data_dir,
             config: AppConfig::default(),
             active_instances: HashMap::new(),
@@ -446,6 +452,98 @@ impl LifecycleCoordinator {
         &self.tray_provider
     }
 
+    /// Mengatur pengelola startup platform.
+    pub fn set_startup_manager(&mut self, startup_manager: Arc<dyn StartupManager>) {
+        self.startup_manager = startup_manager;
+    }
+
+    /// Mengambil referensi pengelola startup platform.
+    pub fn startup_manager(&self) -> &Arc<dyn StartupManager> {
+        &self.startup_manager
+    }
+
+    /// Memeriksa apakah startup otomatis setelah login diaktifkan.
+    pub fn startup_enabled(&self) -> bool {
+        self.config.startup_enabled()
+    }
+
+    /// Mengambil ID profil startup yang dipilih jika ada.
+    pub fn startup_profile_id(&self) -> Option<&ProfileId> {
+        self.config.startup_profile_id()
+    }
+
+    /// Mengambil referensi profil startup yang dipilih jika ada dan valid.
+    pub fn get_startup_profile(&self) -> Option<&Profile> {
+        self.config
+            .startup_profile_id()
+            .and_then(|id| self.get_profile(id))
+    }
+
+    /// Mengaktifkan atau menonaktifkan startup otomatis Window Hop saat login OS.
+    /// Memperbarui pendaftaran OS melalui StartupManager dan menyimpan konfigurasi.
+    pub fn set_startup_enabled(&mut self, enabled: bool) -> Result<(), ApplicationError> {
+        if self.load_failed {
+            let reason = self
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "Gagal memuat konfigurasi awal".to_string());
+            return Err(ApplicationError::BlockedByCorruptState(reason));
+        }
+
+        // 1. Sinkronkan dengan pendaftaran startup OS terlebih dahulu
+        self.startup_manager
+            .set_startup_registered(enabled)
+            .map_err(ApplicationError::Platform)?;
+
+        // 2. Buat kandidat konfigurasi dan simpan ke store
+        let mut candidate_config = self.config.clone();
+        candidate_config.set_startup_enabled(enabled);
+        self.store.save(&candidate_config)?;
+
+        // 3. Komit ke in-memory state
+        self.config = candidate_config;
+        self.last_error = None;
+        let _ = self.update_tray_status();
+        Ok(())
+    }
+
+    /// Mengatur profil yang dipilih sebagai profil startup.
+    /// Jika `id` adalah Some(ref pid), profil tersebut harus ada di daftar profil tersimpan.
+    /// Jika `id` adalah None, pilihan profil startup dihapus.
+    pub fn set_startup_profile_id(
+        &mut self,
+        id: Option<ProfileId>,
+    ) -> Result<(), ApplicationError> {
+        if self.load_failed {
+            let reason = self
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "Gagal memuat konfigurasi awal".to_string());
+            return Err(ApplicationError::BlockedByCorruptState(reason));
+        }
+
+        if let Some(ref pid) = id {
+            if self.get_profile(pid).is_none() {
+                return Err(ApplicationError::ProfileNotFound { id: pid.clone() });
+            }
+        }
+
+        let mut candidate_config = self.config.clone();
+        candidate_config.set_startup_profile_id(id);
+        self.store.save(&candidate_config)?;
+
+        self.config = candidate_config;
+        self.last_error = None;
+        let _ = self.update_tray_status();
+        Ok(())
+    }
+
+    /// Metode pembantu pengujian untuk mengatur ID profil startup tanpa pemeriksaan keberadaan profil
+    /// (mensimulasikan file konfigurasi eksternal yang diedit secara manual atau referensi usang).
+    pub fn set_startup_profile_id_unchecked_for_test(&mut self, id: Option<ProfileId>) {
+        self.config.set_startup_profile_id(id);
+    }
+
     /// Memperbarui status system tray dengan ringkasan status terkini koordinator.
     pub fn update_tray_status(&self) -> Result<(), ApplicationError> {
         let summary = self.status_summary();
@@ -608,6 +706,56 @@ impl LifecycleCoordinator {
                 self.last_error = None;
                 let _ = self.update_tray_status();
                 Ok(result)
+            }
+            Err(err) => {
+                self.last_error = Some(err.to_string());
+                let _ = self.update_tray_status();
+                Err(err)
+            }
+        }
+    }
+
+    /// Menangani aktivasi profil startup yang dipicu secara otomatis setelah login Windows atau baris perintah startup.
+    ///
+    /// Aturan:
+    /// - Jika startup tidak diaktifkan, tidak melakukan apa-apa dan mengembalikan Ok(None).
+    /// - Jika startup diaktifkan namun profil startup belum dipilih atau referensinya tidak valid,
+    ///   mencatat kesalahan pada status koordinator tanpa melakukan fallback ke profil lain atau monitor primary.
+    /// - Jika profil startup valid, mengaktifkan profil melalui koordinator yang sama tanpa membuka jendela pengaturan.
+    /// - Jika monitor tujuan belum tersedia, profil masuk ke status menunggu tanpa meluncurkan browser.
+    /// - Jika profil sebelumnya keluar karena crash atau ditutup manual, aktivasi baru ini akan meluncurkan kembali profil startup.
+    /// - Setiap kesalahan dicatat pada status koordinator dan memperbarui status tray secara senyap tanpa mencuri fokus.
+    pub fn handle_startup_activation(
+        &mut self,
+    ) -> Result<Option<ActivationResult>, ApplicationError> {
+        if !self.config.startup_enabled() {
+            return Ok(None);
+        }
+
+        let Some(startup_id) = self.config.startup_profile_id().cloned() else {
+            let err = ApplicationError::InvalidStartupProfileReference(
+                "Startup aktif tetapi belum ada profil startup yang dipilih".to_string(),
+            );
+            self.last_error = Some(err.to_string());
+            let _ = self.update_tray_status();
+            return Err(err);
+        };
+
+        if self.get_profile(&startup_id).is_none() {
+            let err = ApplicationError::InvalidStartupProfileReference(format!(
+                "Referensi profil startup '{}' tidak valid atau telah dihapus",
+                startup_id
+            ));
+            self.last_error = Some(err.to_string());
+            let _ = self.update_tray_status();
+            return Err(err);
+        }
+
+        match self.activate_profile(&startup_id) {
+            Ok(result) => {
+                self.last_error = None;
+                let _ = self.update_tray_status();
+                Ok(Some(result))
             }
             Err(err) => {
                 self.last_error = Some(err.to_string());
@@ -979,6 +1127,9 @@ impl LifecycleCoordinator {
         // 1. Buat kandidat konfigurasi tanpa profil yang dihapus dan simpan ke store terlebih dahulu
         let mut candidate_config = self.config.clone();
         candidate_config.profiles_mut().retain(|p| p.id() != id);
+        if candidate_config.startup_profile_id() == Some(id) {
+            candidate_config.set_startup_profile_id(None);
+        }
         self.store.save(&candidate_config)?;
 
         // 2. Setelah penyimpanan terkonfirmasi berhasil, hentikan proses yang sedang aktif jika ada

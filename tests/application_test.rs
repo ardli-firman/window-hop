@@ -10,11 +10,11 @@ use window_hop::domain::{
     DraftProfileInput, ExitReason, MonitorDescriptor, MonitorIdentity, ProfileId,
     ProfileLifecycleState, ProfileStatus, TargetMonitorStatus,
 };
-use window_hop::persistence::{FileProfileStore, MemoryProfileStore};
+use window_hop::persistence::{FileProfileStore, MemoryProfileStore, ProfileStore};
 use window_hop::platform::{
     ActivationCommand, Clock, LocalSingleInstanceCoordinator, ManagedProcess, MockClock,
-    MockMonitorProvider, MockProcessLauncher, MockShortcutCreator, MockTrayProvider,
-    ProcessLauncher, SingleInstanceCoordinator,
+    MockMonitorProvider, MockProcessLauncher, MockShortcutCreator, MockStartupManager,
+    MockTrayProvider, ProcessLauncher, SingleInstanceCoordinator,
 };
 
 #[test]
@@ -5555,4 +5555,702 @@ fn test_shutdown_continues_stopping_other_profiles_when_one_fails() {
 
     // Tray must be removed regardless
     assert!(mock_tray.is_removed());
+}
+
+#[test]
+fn test_startup_settings_persist_across_restarts() {
+    let dir = tempdir().expect("tempdir");
+    let file_path = dir.path().join("profiles_startup_persist.json");
+    let store = Arc::new(FileProfileStore::new(&file_path));
+
+    let monitor = MonitorDescriptor {
+        identity: MonitorIdentity::new(r"\\.\DISPLAY1\MONITOR1"),
+        name: "Monitor Antrian".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![monitor.clone()]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = dir.path().join("data");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store.clone(),
+        monitor_provider.clone(),
+        launcher.clone(),
+        clock.clone(),
+        base_dir.clone(),
+    );
+    let startup_manager = Arc::new(MockStartupManager::new(false));
+    coordinator.set_startup_manager(startup_manager.clone());
+
+    let p_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput {
+                name: "Antrian Poliklinik".to_string(),
+                browser_path: PathBuf::from(
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                ),
+                custom_parameters: "--app=https://antrian.poli/display --kiosk".to_string(),
+                target_monitor: Some(monitor.identity.clone()),
+            },
+        )
+        .expect("save profile");
+
+    assert!(!coordinator.startup_enabled());
+    assert!(coordinator.startup_profile_id().is_none());
+
+    // Enable startup and select startup profile
+    coordinator
+        .set_startup_enabled(true)
+        .expect("enable startup");
+    assert!(coordinator.startup_enabled());
+    assert!(startup_manager.is_registered());
+
+    coordinator
+        .set_startup_profile_id(Some(p_id.clone()))
+        .expect("set startup profile");
+    assert_eq!(coordinator.startup_profile_id(), Some(&p_id));
+    assert_eq!(coordinator.get_startup_profile().unwrap().id(), &p_id);
+
+    // Simulate closing and restarting application with fresh coordinator
+    drop(coordinator);
+
+    let mut new_coordinator = LifecycleCoordinator::with_services(
+        store.clone(),
+        monitor_provider,
+        launcher,
+        clock,
+        base_dir,
+    );
+    let new_startup_manager = Arc::new(MockStartupManager::new(true));
+    new_coordinator.set_startup_manager(new_startup_manager.clone());
+    new_coordinator.load().expect("load from store");
+
+    assert!(new_coordinator.startup_enabled());
+    assert_eq!(new_coordinator.startup_profile_id(), Some(&p_id));
+    let startup_profile = new_coordinator
+        .get_startup_profile()
+        .expect("startup profile should exist");
+    assert_eq!(startup_profile.name(), "Antrian Poliklinik");
+
+    // Unset startup settings and verify persistence
+    new_coordinator
+        .set_startup_enabled(false)
+        .expect("disable startup");
+    assert!(!new_coordinator.startup_enabled());
+    assert!(!new_startup_manager.is_registered());
+
+    new_coordinator
+        .set_startup_profile_id(None)
+        .expect("clear startup profile id");
+    assert!(new_coordinator.startup_profile_id().is_none());
+
+    // Reload again
+    let mut third_coordinator = LifecycleCoordinator::from_store(store);
+    third_coordinator.load().expect("reload");
+    assert!(!third_coordinator.startup_enabled());
+    assert!(third_coordinator.startup_profile_id().is_none());
+}
+
+#[test]
+fn test_startup_activation_launches_selected_profile_in_tray() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let monitor = MonitorDescriptor {
+        identity: MonitorIdentity::new(r"\\.\DISPLAY1\MONITOR1"),
+        name: "Monitor Antrian Poliklinik".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![monitor.clone()]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_startup_launch");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+    let mock_tray = Arc::new(MockTrayProvider::new());
+    coordinator.set_tray_provider(mock_tray.clone());
+    let mock_startup = Arc::new(MockStartupManager::new(false));
+    coordinator.set_startup_manager(mock_startup);
+
+    let p_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput {
+                name: "Antrian Rawat Jalan".to_string(),
+                browser_path: PathBuf::from(
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                ),
+                custom_parameters: "--app=https://antrian.poli/rawat-jalan --kiosk".to_string(),
+                target_monitor: Some(monitor.identity.clone()),
+            },
+        )
+        .expect("save profile");
+
+    coordinator
+        .set_startup_enabled(true)
+        .expect("enable startup");
+    coordinator
+        .set_startup_profile_id(Some(p_id.clone()))
+        .expect("set startup profile");
+
+    // Perform startup activation
+    let result = coordinator
+        .handle_startup_activation()
+        .expect("startup activation should succeed");
+
+    assert!(result.is_some());
+    match result.unwrap() {
+        ActivationResult::Launched {
+            pid,
+            target_monitor,
+            login_retention,
+        } => {
+            assert_eq!(target_monitor.identity, monitor.identity);
+            assert_eq!(launcher.launched_processes().len(), 1);
+            assert_eq!(launcher.launched_processes()[0].pid(), pid);
+            assert!(!login_retention.explanation().is_empty());
+        }
+        other => panic!("Expected Launched, got {:?}", other),
+    }
+
+    assert!(coordinator.is_profile_running(&p_id));
+    assert_eq!(
+        coordinator.get_lifecycle_state(&p_id).unwrap(),
+        ProfileLifecycleState::Running {
+            pid: launcher.launched_processes()[0].pid(),
+            target_monitor: monitor,
+        }
+    );
+
+    let summary = coordinator.status_summary();
+    assert_eq!(summary.running_count, 1);
+    assert!(summary.status_text.contains("Antrian Rawat Jalan"));
+    assert!(!summary.has_error);
+    assert!(coordinator.last_error().is_none());
+}
+
+#[test]
+fn test_startup_disabled_does_not_launch_profile() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let monitor = MonitorDescriptor {
+        identity: MonitorIdentity::new(r"\\.\DISPLAY1\MONITOR1"),
+        name: "Monitor Antrian".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![monitor.clone()]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_startup_disabled");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+
+    let p_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput {
+                name: "Antrian Rawat Jalan".to_string(),
+                browser_path: PathBuf::from(
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                ),
+                custom_parameters: "--app=https://antrian.poli/rawat-jalan --kiosk".to_string(),
+                target_monitor: Some(monitor.identity.clone()),
+            },
+        )
+        .expect("save profile");
+
+    coordinator
+        .set_startup_profile_id(Some(p_id.clone()))
+        .expect("set startup profile");
+    assert!(!coordinator.startup_enabled());
+
+    let result = coordinator
+        .handle_startup_activation()
+        .expect("handle startup activation");
+
+    assert!(result.is_none(), "Startup disabled must return Ok(None)");
+    assert_eq!(launcher.launched_processes().len(), 0);
+    assert!(!coordinator.is_profile_running(&p_id));
+    assert_eq!(
+        coordinator.get_lifecycle_state(&p_id).unwrap(),
+        ProfileLifecycleState::Idle
+    );
+}
+
+#[test]
+fn test_startup_activation_can_restart_previously_crashed_or_manually_closed_profile() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let monitor = MonitorDescriptor {
+        identity: MonitorIdentity::new(r"\\.\DISPLAY1\MONITOR1"),
+        name: "Monitor Antrian".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![monitor.clone()]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_startup_restart_crashed");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider.clone(),
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+    coordinator.set_startup_manager(Arc::new(MockStartupManager::new(false)));
+
+    let p_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput {
+                name: "Antrian Poli".to_string(),
+                browser_path: PathBuf::from(
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                ),
+                custom_parameters: "--app=https://antrian.poli --kiosk".to_string(),
+                target_monitor: Some(monitor.identity.clone()),
+            },
+        )
+        .expect("save profile");
+
+    coordinator
+        .set_startup_enabled(true)
+        .expect("enable startup");
+    coordinator
+        .set_startup_profile_id(Some(p_id.clone()))
+        .expect("set startup profile");
+
+    // Initial activation
+    coordinator
+        .activate_profile(&p_id)
+        .expect("initial activation");
+    assert_eq!(launcher.launched_processes().len(), 1);
+    let proc1 = launcher.launched_processes()[0].clone();
+
+    // Browser crashes
+    proc1.simulate_exit();
+    let outcome = coordinator
+        .handle_process_exit(proc1.pid(), ExitReason::Crash)
+        .expect("handle crash");
+    assert_eq!(
+        outcome,
+        LifecycleTransitionOutcome::Exited {
+            profile_id: p_id.clone(),
+            pid: proc1.pid(),
+            reason: ExitReason::Crash,
+        }
+    );
+    assert_eq!(
+        coordinator.get_lifecycle_state(&p_id).unwrap(),
+        ProfileLifecycleState::Exited {
+            reason: ExitReason::Crash
+        }
+    );
+
+    // Verify monitor reconnect does NOT resurrect the crashed profile (acceptance requirement)
+    monitor_provider.set_monitors(vec![monitor.clone()]);
+    let reconnect_res = coordinator.handle_monitors_changed().expect("reconnect");
+    assert!(
+        reconnect_res.is_empty(),
+        "Crashed profile must not be resurrected by reconnect"
+    );
+    assert_eq!(launcher.launched_processes().len(), 1);
+
+    // On next Windows login (handle_startup_activation): profile is restarted cleanly!
+    let startup_res = coordinator
+        .handle_startup_activation()
+        .expect("startup activation after crash");
+    assert!(startup_res.is_some());
+    assert_eq!(launcher.launched_processes().len(), 2);
+    let proc2 = launcher.launched_processes()[1].clone();
+    assert_ne!(proc1.pid(), proc2.pid());
+    assert!(coordinator.is_profile_running(&p_id));
+    assert_eq!(
+        coordinator.get_lifecycle_state(&p_id).unwrap(),
+        ProfileLifecycleState::Running {
+            pid: proc2.pid(),
+            target_monitor: monitor,
+        }
+    );
+}
+
+#[test]
+fn test_startup_activation_when_target_monitor_unavailable_enters_waiting_state_no_fallback() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let target_identity = MonitorIdentity::new(r"\\.\DISPLAY2\MONITOR2");
+    let primary_monitor = MonitorDescriptor {
+        identity: MonitorIdentity::new(r"\\.\DISPLAY1\MONITOR1"),
+        name: "Monitor Utama Perawat".to_string(),
+        is_primary: true,
+    };
+    // Target monitor 2 is disconnected/unavailable at boot time
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![primary_monitor.clone()]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_startup_monitor_unavailable");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider.clone(),
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+    let mock_tray = Arc::new(MockTrayProvider::new());
+    coordinator.set_tray_provider(mock_tray.clone());
+    coordinator.set_startup_manager(Arc::new(MockStartupManager::new(false)));
+
+    let p_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput {
+                name: "Antrian Kamar Bedah".to_string(),
+                browser_path: PathBuf::from(
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                ),
+                custom_parameters: "--app=https://antrian.bedah --kiosk".to_string(),
+                target_monitor: Some(target_identity.clone()),
+            },
+        )
+        .expect("save profile");
+
+    coordinator
+        .set_startup_enabled(true)
+        .expect("enable startup");
+    coordinator
+        .set_startup_profile_id(Some(p_id.clone()))
+        .expect("set startup profile");
+
+    // Login with startup active, but target monitor not connected
+    let startup_res = coordinator
+        .handle_startup_activation()
+        .expect("handle startup activation should transition to waiting");
+
+    assert_eq!(
+        startup_res,
+        Some(ActivationResult::WaitingForMonitor {
+            target_monitor: target_identity.clone(),
+        })
+    );
+    // Crucial: No browser launched on primary monitor!
+    assert_eq!(launcher.launched_processes().len(), 0);
+    assert!(!coordinator.is_profile_running(&p_id));
+    assert_eq!(
+        coordinator.get_lifecycle_state(&p_id).unwrap(),
+        ProfileLifecycleState::WaitingForMonitor {
+            target_monitor: target_identity.clone(),
+        }
+    );
+
+    // Tray status reflects waiting without popup or stealing focus
+    let summary = coordinator.status_summary();
+    assert_eq!(summary.waiting_count, 1);
+    assert_eq!(summary.running_count, 0);
+    assert_eq!(summary.status_text, "Menunggu monitor tujuan");
+
+    // Target monitor connects later
+    let target_monitor = MonitorDescriptor {
+        identity: target_identity.clone(),
+        name: "Monitor Antrian Bedah".to_string(),
+        is_primary: false,
+    };
+    monitor_provider.set_monitors(vec![primary_monitor, target_monitor.clone()]);
+    let restored = coordinator
+        .handle_monitors_changed()
+        .expect("handle reconnect");
+
+    assert_eq!(restored.len(), 1);
+    assert_eq!(launcher.launched_processes().len(), 1);
+    assert!(coordinator.is_profile_running(&p_id));
+    assert_eq!(
+        coordinator.get_lifecycle_state(&p_id).unwrap(),
+        ProfileLifecycleState::Running {
+            pid: launcher.launched_processes()[0].pid(),
+            target_monitor,
+        }
+    );
+}
+
+#[test]
+fn test_startup_activation_fails_without_fallback_when_startup_profile_unselected_or_invalid() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let monitor = MonitorDescriptor {
+        identity: MonitorIdentity::new(r"\\.\DISPLAY1\MONITOR1"),
+        name: "Monitor Antrian".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![monitor.clone()]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_startup_invalid_ref");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+    let mock_tray = Arc::new(MockTrayProvider::new());
+    coordinator.set_tray_provider(mock_tray.clone());
+    coordinator.set_startup_manager(Arc::new(MockStartupManager::new(false)));
+
+    // Case A: Startup enabled, but startup_profile_id is None
+    coordinator
+        .set_startup_enabled(true)
+        .expect("enable startup");
+    assert!(coordinator.startup_profile_id().is_none());
+
+    let res_a = coordinator.handle_startup_activation();
+    assert!(
+        res_a.is_err(),
+        "Must return error when no startup profile chosen"
+    );
+    match res_a.unwrap_err() {
+        ApplicationError::InvalidStartupProfileReference(msg) => {
+            assert!(msg.contains("belum ada profil startup"));
+        }
+        other => panic!("Expected InvalidStartupProfileReference, got {:?}", other),
+    }
+    assert_eq!(launcher.launched_processes().len(), 0);
+    assert!(coordinator.last_error().is_some());
+    assert!(coordinator.status_summary().has_error);
+
+    // Case B: Startup enabled, but startup_profile_id references a non-existent / deleted profile
+    let fake_id = ProfileId::new("non-existent-profile-12345");
+    // Manually set invalid startup_profile_id on internal config to simulate external file edit/corruption
+    coordinator.set_startup_profile_id_unchecked_for_test(Some(fake_id));
+
+    let res_b = coordinator.handle_startup_activation();
+    assert!(res_b.is_err(), "Must return error without fallback");
+    match res_b.unwrap_err() {
+        ApplicationError::InvalidStartupProfileReference(msg) => {
+            assert!(msg.contains("tidak valid atau telah dihapus"));
+        }
+        other => panic!("Expected InvalidStartupProfileReference, got {:?}", other),
+    }
+    // No fallback to any other profile or primary monitor
+    assert_eq!(launcher.launched_processes().len(), 0);
+    assert!(coordinator.last_error().is_some());
+}
+
+#[test]
+fn test_delete_profile_clears_startup_profile_id_when_deleted_profile_was_startup_profile() {
+    let dir = tempdir().expect("tempdir");
+    let file_path = dir.path().join("profiles_delete_startup.json");
+    let store = Arc::new(FileProfileStore::new(&file_path));
+
+    let monitor = MonitorDescriptor {
+        identity: MonitorIdentity::new(r"\\.\DISPLAY1\MONITOR1"),
+        name: "Monitor Antrian".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![monitor.clone()]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = dir.path().join("data");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store.clone(),
+        monitor_provider,
+        launcher,
+        clock,
+        base_dir,
+    );
+    coordinator.set_startup_manager(Arc::new(MockStartupManager::new(false)));
+
+    let p1_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput {
+                name: "Antrian 1".to_string(),
+                browser_path: PathBuf::from(
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                ),
+                custom_parameters: "--app=https://antrian.poli/1 --kiosk".to_string(),
+                target_monitor: Some(monitor.identity.clone()),
+            },
+        )
+        .expect("save p1");
+
+    let p2_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput {
+                name: "Antrian 2".to_string(),
+                browser_path: PathBuf::from(
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                ),
+                custom_parameters: "--app=https://antrian.poli/2 --kiosk".to_string(),
+                target_monitor: Some(monitor.identity.clone()),
+            },
+        )
+        .expect("save p2");
+
+    coordinator
+        .set_startup_enabled(true)
+        .expect("enable startup");
+    coordinator
+        .set_startup_profile_id(Some(p1_id.clone()))
+        .expect("set p1 as startup profile");
+
+    assert_eq!(coordinator.startup_profile_id(), Some(&p1_id));
+
+    // Delete p1 (which was the startup profile)
+    coordinator.delete_profile(&p1_id).expect("delete p1");
+
+    // Verify startup_profile_id is now None
+    assert!(coordinator.startup_profile_id().is_none());
+
+    // Verify persisted store also has None for startup_profile_id
+    let reloaded = store.load().expect("reload from store");
+    assert_eq!(reloaded.profiles().len(), 1);
+    assert_eq!(reloaded.profiles()[0].id(), &p2_id);
+    assert!(reloaded.startup_enabled());
+    assert!(reloaded.startup_profile_id().is_none());
+}
+
+#[test]
+fn test_startup_settings_os_registration_failure_preserves_state() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let monitor_provider = Arc::new(MockMonitorProvider::new(Vec::new()));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_startup_os_fail");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store.clone(),
+        monitor_provider,
+        launcher,
+        clock,
+        base_dir,
+    );
+
+    let startup_manager = Arc::new(MockStartupManager::new(false));
+    coordinator.set_startup_manager(startup_manager.clone());
+
+    // Simulate platform OS registration error
+    startup_manager.set_error(Some("Registry permission denied".to_string()));
+
+    let res = coordinator.set_startup_enabled(true);
+    assert!(res.is_err());
+    match res.unwrap_err() {
+        ApplicationError::Platform(err) => {
+            assert!(err.to_string().contains("Registry permission denied"));
+        }
+        other => panic!("Expected Platform error, got {:?}", other),
+    }
+
+    assert!(!coordinator.startup_enabled());
+    assert!(!startup_manager.is_registered());
+
+    // Stored config should also still be false
+    let stored = store.load().unwrap();
+    assert!(!stored.startup_enabled());
+}
+
+#[test]
+fn test_concurrent_shortcut_and_startup_activation_share_single_coordinator() {
+    let store = Arc::new(MemoryProfileStore::new());
+    let monitor1 = MonitorDescriptor {
+        identity: MonitorIdentity::new(r"\\.\DISPLAY1\MONITOR1"),
+        name: "Monitor Antrian 1".to_string(),
+        is_primary: false,
+    };
+    let monitor2 = MonitorDescriptor {
+        identity: MonitorIdentity::new(r"\\.\DISPLAY2\MONITOR2"),
+        name: "Monitor Antrian 2".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![
+        monitor1.clone(),
+        monitor2.clone(),
+    ]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = PathBuf::from("/tmp/window_hop_test_concurrent_startup_shortcut");
+
+    let mut coordinator = LifecycleCoordinator::with_services(
+        store,
+        monitor_provider,
+        launcher.clone(),
+        clock,
+        base_dir,
+    );
+    coordinator.set_startup_manager(Arc::new(MockStartupManager::new(false)));
+
+    let startup_p_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput {
+                name: "Antrian Startup".to_string(),
+                browser_path: PathBuf::from(
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                ),
+                custom_parameters: "--app=https://antrian.poli/startup --kiosk".to_string(),
+                target_monitor: Some(monitor1.identity.clone()),
+            },
+        )
+        .expect("save startup profile");
+
+    let shortcut_p_id = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput {
+                name: "Antrian Shortcut".to_string(),
+                browser_path: PathBuf::from(
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                ),
+                custom_parameters: "--app=https://antrian.poli/shortcut --kiosk".to_string(),
+                target_monitor: Some(monitor2.identity.clone()),
+            },
+        )
+        .expect("save shortcut profile");
+
+    coordinator
+        .set_startup_enabled(true)
+        .expect("enable startup");
+    coordinator
+        .set_startup_profile_id(Some(startup_p_id.clone()))
+        .expect("set startup profile");
+
+    // Rapid concurrent launch: shortcut clicked while startup runs
+    let res_shortcut = coordinator
+        .handle_shortcut_activation(&shortcut_p_id)
+        .expect("shortcut activation");
+    assert!(matches!(res_shortcut, ActivationResult::Launched { .. }));
+
+    let res_startup = coordinator
+        .handle_startup_activation()
+        .expect("startup activation");
+    assert!(matches!(
+        res_startup,
+        Some(ActivationResult::Launched { .. })
+    ));
+
+    // Both profiles run on their respective target monitors under the single coordinator
+    assert_eq!(launcher.launched_processes().len(), 2);
+    assert!(coordinator.is_profile_running(&shortcut_p_id));
+    assert!(coordinator.is_profile_running(&startup_p_id));
+
+    // Repeated startup activation for the already running startup profile reuses the window without duplicate
+    let res_startup_repeat = coordinator
+        .handle_startup_activation()
+        .expect("repeat startup activation");
+    assert!(matches!(
+        res_startup_repeat,
+        Some(ActivationResult::Reused { .. })
+    ));
+    assert_eq!(launcher.launched_processes().len(), 2);
 }
