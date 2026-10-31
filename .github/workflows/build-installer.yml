@@ -85,6 +85,21 @@ jobs:
       - name: Install GNU Make
         run: choco install make --no-progress -y
 
+      - name: Verify NSIS Compiler
+        shell: bash
+        run: |
+          if command -v makensis >/dev/null 2>&1; then
+            echo "makensis is in PATH."
+            makensis /VERSION
+          elif [ -f "C:/Program Files (x86)/NSIS/makensis.exe" ]; then
+            echo "Adding NSIS from Program Files to GITHUB_PATH..."
+            echo "C:/Program Files (x86)/NSIS" >> "$GITHUB_PATH"
+          else
+            echo "Installing NSIS via chocolatey..."
+            choco install nsis -y --no-progress
+            echo "C:/Program Files (x86)/NSIS" >> "$GITHUB_PATH"
+          fi
+
       - name: Resolve Version
         id: ver
         shell: bash
@@ -142,9 +157,9 @@ jobs:
         run: |
           cd dist
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum window-hop.exe window-hop-installer.exe *.zip > SHA256SUMS.txt
+            sha256sum *.exe *.zip > SHA256SUMS.txt
           else
-            powershell.exe -Command "Get-ChildItem -File | Get-FileHash -Algorithm SHA256 | ForEach-Object { '{0}  {1}' -f \$_.Hash.ToLower(), \$_.Path.Split('\\')[-1] }" > SHA256SUMS.txt
+            powershell.exe -Command "Get-ChildItem -File -Filter '*.exe','*.zip' | Get-FileHash -Algorithm SHA256 | ForEach-Object { '{0}  {1}' -f \$_.Hash.ToLower(), \$_.Path.Split('\\')[-1] }" > SHA256SUMS.txt
           fi
           echo "=== SHA256 Checksums ==="
           cat SHA256SUMS.txt
@@ -154,10 +169,10 @@ jobs:
         with:
           name: window-hop-v${{ steps.ver.outputs.version }}-windows-x64
           path: |
-            dist/window-hop.exe
+            dist/WindowHop-Setup*.exe
             dist/window-hop-installer.exe
+            dist/window-hop-v*-portable.zip
             dist/INSTALL-GUIDE.txt
-            dist/*.zip
             dist/SHA256SUMS.txt
           if-no-files-found: error
 
@@ -170,10 +185,10 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            dist/window-hop.exe
+            dist/WindowHop-Setup*.exe
             dist/window-hop-installer.exe
+            dist/window-hop-v*-portable.zip
             dist/INSTALL-GUIDE.txt
-            dist/*.zip
             dist/SHA256SUMS.txt
           generate_release_notes: true
         env:
