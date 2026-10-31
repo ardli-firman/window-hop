@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use window_hop::application::LifecycleCoordinator;
 use window_hop::domain::DraftProfileInput;
 use window_hop::installer::{
-    default_install_dir, install, is_dev_build_path, resolve_installed_app_executable,
+    default_install_dir, install, is_dev_build_path, resolve_installed_app_executable, uninstall,
     validate_os_baseline, verify_installation, Arch, InstallError, InstallOptions, OsVersion,
 };
 use window_hop::persistence::FileProfileStore;
@@ -140,7 +140,11 @@ fn test_install_copies_executable_resources_and_creates_manifest() {
     let options = InstallOptions {
         install_dir: target_dir.clone(),
         source_exe: source_exe.clone(),
+        embedded_payload: None,
         bundle_resources: true,
+        create_start_menu_shortcut: false,
+        create_desktop_shortcut: false,
+        register_uninstaller: false,
     };
 
     let receipt = install(&options).expect("Installation should succeed");
@@ -183,7 +187,11 @@ fn test_install_fails_when_source_payload_is_missing() {
     let options = InstallOptions {
         install_dir: target_dir,
         source_exe: missing_exe.clone(),
+        embedded_payload: None,
         bundle_resources: true,
+        create_start_menu_shortcut: false,
+        create_desktop_shortcut: false,
+        register_uninstaller: false,
     };
 
     let err = install(&options).unwrap_err();
@@ -205,7 +213,11 @@ fn test_verify_installation_detects_missing_executable() {
     let options = InstallOptions {
         install_dir: target_dir.clone(),
         source_exe,
+        embedded_payload: None,
         bundle_resources: true,
+        create_start_menu_shortcut: false,
+        create_desktop_shortcut: false,
+        register_uninstaller: false,
     };
 
     install(&options).unwrap();
@@ -323,4 +335,67 @@ fn test_create_profile_shortcut_and_startup_use_installed_application_location()
         Some(installed_exe),
         "Startup registration must use the installed application, NOT dev build folder"
     );
+}
+
+#[test]
+fn test_install_with_embedded_payload_extracts_executable_without_source_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let target_dir = temp.path().join("bundled_install");
+    let non_existent_source = temp.path().join("does_not_exist.exe");
+
+    let embedded_bytes: &'static [u8] = b"MZ_EMBEDDED_PAYLOAD_TEST_DATA_12345";
+
+    let options = InstallOptions {
+        install_dir: target_dir.clone(),
+        source_exe: non_existent_source,
+        embedded_payload: Some(embedded_bytes),
+        bundle_resources: true,
+        create_start_menu_shortcut: false,
+        create_desktop_shortcut: false,
+        register_uninstaller: false,
+    };
+
+    let receipt = install(&options).expect("Installation with embedded payload should succeed");
+    assert_eq!(receipt.install_dir, target_dir);
+    let installed_exe = target_dir.join("window-hop.exe");
+    assert!(installed_exe.exists());
+
+    let written_bytes = fs::read(&installed_exe).unwrap();
+    assert_eq!(written_bytes, embedded_bytes);
+
+    // Verify manifest was also written properly
+    let manifest_path = target_dir.join("install-manifest.json");
+    assert!(manifest_path.exists());
+}
+
+#[test]
+fn test_uninstall_removes_installed_files_and_cleans_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let target_dir = temp.path().join("to_uninstall");
+
+    let options = InstallOptions {
+        install_dir: target_dir.clone(),
+        source_exe: PathBuf::from("dummy.exe"),
+        embedded_payload: Some(b"MZ_PAYLOAD_TO_UNINSTALL"),
+        bundle_resources: true,
+        create_start_menu_shortcut: false,
+        create_desktop_shortcut: false,
+        register_uninstaller: false,
+    };
+
+    install(&options).expect("Initial install should succeed");
+    assert!(target_dir.join("window-hop.exe").exists());
+    assert!(target_dir.join("INSTALL-GUIDE.txt").exists());
+    assert!(target_dir.join("install-manifest.json").exists());
+
+    let receipt = uninstall(&target_dir).expect("Uninstall should succeed");
+    assert!(!target_dir.join("window-hop.exe").exists());
+    assert!(!target_dir.join("INSTALL-GUIDE.txt").exists());
+    assert!(!target_dir.join("install-manifest.json").exists());
+    assert!(
+        !target_dir.exists(),
+        "Empty install directory should be removed"
+    );
+    assert!(receipt.success);
+    assert!(receipt.uninstalled_files.len() >= 3);
 }

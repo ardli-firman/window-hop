@@ -39,7 +39,11 @@ else
 endif
 
 DIST_DIR := dist
-ZIP_NAME := window-hop-v$(VERSION)-windows-x64.zip
+ZIP_NAME := window-hop-v$(VERSION)-portable.zip
+PORTABLE_ZIP := window-hop-v$(VERSION)-portable.zip
+SETUP_EXE := WindowHop-Setup$(EXE_EXT)
+SETUP_VERSIONED_EXE := WindowHop-Setup-v$(VERSION)$(EXE_EXT)
+NSIS_BIN := $(shell which makensis 2>/dev/null || echo "")
 VERSION_TOOL := $(DEBUG_DIR)/version-tool$(EXE_EXT)
 
 .PHONY: all help run run-dev run-installer run-release dev build-dev release build-release installer package package-dev \
@@ -120,14 +124,26 @@ dev-installer:
 release: build-release
 
 build-release:
-	@echo "==> Building release executables (profile: release)..."
-	cargo build --release $(CARGO_TARGET_FLAG) --bin window-hop --bin window-hop-installer
+	@echo "==> Building release application executable..."
+	cargo build --release $(CARGO_TARGET_FLAG) --bin window-hop
+	@echo "==> Building self-contained bundled installer with embedded payload..."
+	WINDOW_HOP_PAYLOAD_PATH=$(RELEASE_DIR)/window-hop$(EXE_EXT) cargo build --release $(CARGO_TARGET_FLAG) --bin window-hop-installer
 	@echo "Release binaries built at $(RELEASE_DIR)/"
 
 installer:
-	@echo "==> Building release installer executable..."
-	cargo build --release $(CARGO_TARGET_FLAG) --bin window-hop-installer
+	@echo "==> Building release application for installer payload..."
+	cargo build --release $(CARGO_TARGET_FLAG) --bin window-hop
+	@echo "==> Building self-contained release installer executable..."
+	WINDOW_HOP_PAYLOAD_PATH=$(RELEASE_DIR)/window-hop$(EXE_EXT) cargo build --release $(CARGO_TARGET_FLAG) --bin window-hop-installer
 	@echo "Release installer built at $(RELEASE_DIR)/window-hop-installer$(EXE_EXT)"
+	@if [ -n "$(NSIS_BIN)" ]; then \
+		mkdir -p $(DIST_DIR); \
+		cp $(RELEASE_DIR)/window-hop$(EXE_EXT) $(DIST_DIR)/; \
+		cp docs/install-guide.md $(DIST_DIR)/INSTALL-GUIDE.txt; \
+		echo "==> Compiling NSIS installer $(DIST_DIR)/$(SETUP_EXE)..."; \
+		$(NSIS_BIN) -DVERSION=$(VERSION) -DOUTFILE=../$(DIST_DIR)/$(SETUP_EXE) installer/installer.nsi; \
+		cp $(DIST_DIR)/$(SETUP_EXE) $(DIST_DIR)/$(SETUP_VERSIONED_EXE); \
+	fi
 
 # ------------------------------------------------------------------------------
 # Packaging
@@ -139,18 +155,25 @@ package: release
 	@cp $(RELEASE_DIR)/window-hop$(EXE_EXT) $(DIST_DIR)/
 	@cp $(RELEASE_DIR)/window-hop-installer$(EXE_EXT) $(DIST_DIR)/
 	@cp docs/install-guide.md $(DIST_DIR)/INSTALL-GUIDE.txt
-	@echo "==> Creating distribution archive $(DIST_DIR)/$(ZIP_NAME)..."
+	@if [ -n "$(NSIS_BIN)" ]; then \
+		echo "==> Compiling NSIS installer $(DIST_DIR)/$(SETUP_EXE)..."; \
+		$(NSIS_BIN) -DVERSION=$(VERSION) -DOUTFILE=../$(DIST_DIR)/$(SETUP_EXE) installer/installer.nsi; \
+		cp $(DIST_DIR)/$(SETUP_EXE) $(DIST_DIR)/$(SETUP_VERSIONED_EXE); \
+	else \
+		echo "==> makensis not found, skipping NSIS setup compiler. Bundled window-hop-installer$(EXE_EXT) is available."; \
+	fi
+	@echo "==> Creating portable distribution archive $(DIST_DIR)/$(PORTABLE_ZIP)..."
 	@cd $(DIST_DIR) && \
 	if command -v zip >/dev/null 2>&1; then \
-		zip -q -r $(ZIP_NAME) window-hop$(EXE_EXT) window-hop-installer$(EXE_EXT) INSTALL-GUIDE.txt; \
+		zip -q $(PORTABLE_ZIP) window-hop$(EXE_EXT) INSTALL-GUIDE.txt; \
 	elif command -v powershell.exe >/dev/null 2>&1; then \
-		powershell.exe -NoProfile -Command "Compress-Archive -Path window-hop$(EXE_EXT),window-hop-installer$(EXE_EXT),INSTALL-GUIDE.txt -DestinationPath $(ZIP_NAME) -Force"; \
+		powershell.exe -NoProfile -Command "Compress-Archive -Path window-hop$(EXE_EXT),INSTALL-GUIDE.txt -DestinationPath $(PORTABLE_ZIP) -Force"; \
 	elif command -v pwsh >/dev/null 2>&1; then \
-		pwsh -NoProfile -Command "Compress-Archive -Path window-hop$(EXE_EXT),window-hop-installer$(EXE_EXT),INSTALL-GUIDE.txt -DestinationPath $(ZIP_NAME) -Force"; \
+		pwsh -NoProfile -Command "Compress-Archive -Path window-hop$(EXE_EXT),INSTALL-GUIDE.txt -DestinationPath $(PORTABLE_ZIP) -Force"; \
 	elif command -v 7z >/dev/null 2>&1; then \
-		7z a -bd -bso0 $(ZIP_NAME) window-hop$(EXE_EXT) window-hop-installer$(EXE_EXT) INSTALL-GUIDE.txt; \
+		7z a -bd -bso0 $(PORTABLE_ZIP) window-hop$(EXE_EXT) INSTALL-GUIDE.txt; \
 	else \
-		tar -czf window-hop-v$(VERSION)-windows-x64.tar.gz window-hop$(EXE_EXT) window-hop-installer$(EXE_EXT) INSTALL-GUIDE.txt; \
+		tar -czf window-hop-v$(VERSION)-portable.tar.gz window-hop$(EXE_EXT) INSTALL-GUIDE.txt; \
 	fi
 	@echo "==> Package ready:"
 	@ls -lh $(DIST_DIR)
@@ -161,18 +184,18 @@ package-dev: build-dev
 	@cp $(DEBUG_DIR)/window-hop$(EXE_EXT) $(DIST_DIR)/
 	@cp $(DEBUG_DIR)/window-hop-installer$(EXE_EXT) $(DIST_DIR)/
 	@cp docs/install-guide.md $(DIST_DIR)/INSTALL-GUIDE.txt
-	@echo "==> Creating development archive $(DIST_DIR)/$(ZIP_NAME)..."
+	@echo "==> Creating development archive $(DIST_DIR)/$(PORTABLE_ZIP)..."
 	@cd $(DIST_DIR) && \
 	if command -v zip >/dev/null 2>&1; then \
-		zip -q -r $(ZIP_NAME) window-hop$(EXE_EXT) window-hop-installer$(EXE_EXT) INSTALL-GUIDE.txt; \
+		zip -q $(PORTABLE_ZIP) window-hop$(EXE_EXT) INSTALL-GUIDE.txt; \
 	elif command -v powershell.exe >/dev/null 2>&1; then \
-		powershell.exe -NoProfile -Command "Compress-Archive -Path window-hop$(EXE_EXT),window-hop-installer$(EXE_EXT),INSTALL-GUIDE.txt -DestinationPath $(ZIP_NAME) -Force"; \
+		powershell.exe -NoProfile -Command "Compress-Archive -Path window-hop$(EXE_EXT),INSTALL-GUIDE.txt -DestinationPath $(PORTABLE_ZIP) -Force"; \
 	elif command -v pwsh >/dev/null 2>&1; then \
-		pwsh -NoProfile -Command "Compress-Archive -Path window-hop$(EXE_EXT),window-hop-installer$(EXE_EXT),INSTALL-GUIDE.txt -DestinationPath $(ZIP_NAME) -Force"; \
+		pwsh -NoProfile -Command "Compress-Archive -Path window-hop$(EXE_EXT),INSTALL-GUIDE.txt -DestinationPath $(PORTABLE_ZIP) -Force"; \
 	elif command -v 7z >/dev/null 2>&1; then \
-		7z a -bd -bso0 $(ZIP_NAME) window-hop$(EXE_EXT) window-hop-installer$(EXE_EXT) INSTALL-GUIDE.txt; \
+		7z a -bd -bso0 $(PORTABLE_ZIP) window-hop$(EXE_EXT) INSTALL-GUIDE.txt; \
 	else \
-		tar -czf window-hop-v$(VERSION)-windows-x64.tar.gz window-hop$(EXE_EXT) window-hop-installer$(EXE_EXT) INSTALL-GUIDE.txt; \
+		tar -czf window-hop-v$(VERSION)-portable.tar.gz window-hop$(EXE_EXT) INSTALL-GUIDE.txt; \
 	fi
 	@echo "==> Development package ready:"
 	@ls -lh $(DIST_DIR)
