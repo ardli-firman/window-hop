@@ -132,8 +132,8 @@ impl LaunchParameters {
 
     /// Melakukan parsing dua arah dari raw string `custom_parameters`.
     ///
-    /// Mengekstrak flag `--app` (atau `--app=URL`, `--app="URL"`, `-app`, `/app`) menjadi field `url`,
-    /// flag `--kiosk` (atau `-kiosk`, `/kiosk`) menjadi boolean `kiosk`,
+    /// Mengekstrak flag `--app=URL` atau `--app <URL>` (serta raw URL) menjadi field `url`,
+    /// flag `--kiosk` menjadi boolean `kiosk`,
     /// serta mempertahankan parameter baris perintah lainnya secara utuh dalam `advanced_parameters`.
     pub fn parse(input: &str) -> Result<Self, BrowserError> {
         let trimmed = input.trim();
