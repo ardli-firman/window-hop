@@ -3,9 +3,10 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::tag::{Tag as Badge, TagVariant};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable as _};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable as _, IconName, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -223,6 +224,9 @@ impl WindowHopView {
                             )
                             .child(
                                 Button::new("btn-refresh-monitors")
+                                    .outline()
+                                    .small()
+                                    .icon(IconName::RefreshCw)
                                     .label("Segarkan Monitor")
                                     .disabled(is_busy)
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -233,15 +237,8 @@ impl WindowHopView {
             )
             .when_some(self.monitors_error.as_ref(), |this, err| {
                 this.child(
-                    div()
-                        .p_2()
-                        .rounded_md()
-                        .bg(theme.danger.opacity(0.1))
-                        .border_1()
-                        .border_color(theme.danger)
-                        .text_xs()
-                        .text_color(theme.danger)
-                        .child(format!("Peringatan sistem display: {}", err)),
+                    Alert::error("monitors-error", format!("Peringatan sistem display: {}", err))
+                        .title("Peringatan Display"),
                 )
             })
             .child(
@@ -344,7 +341,7 @@ impl WindowHopView {
                     TargetMonitorStatus::Unset => (
                         "ℹ Status Kesiapan: Draft (Belum Siap Diaktifkan). Monitor tujuan belum dipilih; aplikasi tidak meluncurkan browser.".to_string(),
                         theme.muted_foreground,
-                        theme.muted,
+                        *theme.tokens.group_box,
                     ),
                     TargetMonitorStatus::Available(desc) => (
                         format!(
@@ -414,9 +411,9 @@ impl WindowHopView {
         let (bg, border) = if !card.is_connected {
             (theme.warning.opacity(0.08), theme.warning)
         } else if card.is_selected {
-            (theme.accent.opacity(0.2), theme.primary)
+            (theme.primary.opacity(0.12), theme.primary)
         } else {
-            (theme.muted.opacity(0.15), theme.border)
+            (*theme.tokens.group_box, theme.border)
         };
 
         let card_identity = card.identity.clone();
@@ -429,6 +426,7 @@ impl WindowHopView {
             .border_1()
             .border_color(border)
             .bg(bg)
+            .hover(|s| s.bg(theme.accent.opacity(0.18)))
             .when(card.is_dashed_border(), |this| this.border_dashed())
             .when(card.is_dimmed(), |this| this.opacity(0.75))
             .when(card.is_connected, |this| {
@@ -445,10 +443,16 @@ impl WindowHopView {
                         h_flex()
                             .justify_between()
                             .items_center()
+                            .flex_wrap()
+                            .gap_2()
+                            .w_full()
                             .child(
                                 h_flex()
+                                    .flex_1()
+                                    .min_w_0()
                                     .gap_2()
                                     .items_center()
+                                    .flex_wrap()
                                     .child(
                                         div()
                                             .text_sm()
@@ -470,15 +474,20 @@ impl WindowHopView {
                                         card.role_badge(),
                                         |this, (badge_label, badge_variant)| {
                                             this.child(
-                                                Badge::new()
-                                                    .with_variant(badge_variant)
-                                                    .child(badge_label),
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .child(
+                                                        Badge::new()
+                                                            .with_variant(badge_variant)
+                                                            .child(badge_label),
+                                                    ),
                                             )
                                         },
                                     ),
                             )
                             .child(
                                 div()
+                                    .flex_shrink_0()
                                     .text_xs()
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(if card.is_connected {
@@ -499,8 +508,10 @@ impl WindowHopView {
                     )
                     .child(
                         h_flex()
-                            .gap_4()
+                            .gap_3()
                             .items_center()
+                            .flex_wrap()
+                            .w_full()
                             .child(
                                 div()
                                     .text_xs()
@@ -528,6 +539,8 @@ impl WindowHopView {
                             .child(
                                 div()
                                     .text_xs()
+                                    .truncate()
+                                    .max_w(px(260.0))
                                     .text_color(theme.muted_foreground)
                                     .child(format!("Identitas: {}", card.identity)),
                             ),

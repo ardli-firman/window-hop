@@ -93,12 +93,18 @@ impl ShadcnTokens {
         }
     }
 
-    /// Resolves semantic shadcn tokens based on the active theme mode.
+    /// Resolves semantic tokens dynamically from the active gpui-kit Theme.
     pub fn for_theme(theme: &Theme) -> Self {
-        if theme.mode.is_dark() {
-            Self::zinc_dark()
-        } else {
-            Self::zinc_light()
+        Self {
+            background: theme.background,
+            foreground: theme.foreground,
+            card: *theme.tokens.group_box,
+            card_foreground: theme.foreground,
+            border: theme.border,
+            muted: theme.muted,
+            muted_foreground: theme.muted_foreground,
+            accent: theme.accent,
+            primary: theme.primary,
         }
     }
 }

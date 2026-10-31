@@ -2,10 +2,11 @@
 
 use std::path::PathBuf;
 
+use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable as _};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable as _, Icon, IconName};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -95,34 +96,55 @@ impl WindowHopView {
 
         v_flex()
             .flex_1()
+            .h_full()
+            .min_h_0()
+            .min_w_0()
             .rounded_lg()
             .border_1()
-            .border_color(shadcn.border)
-            .bg(shadcn.card)
-            .text_color(shadcn.card_foreground)
+            .border_color(theme.border)
+            .bg(theme.tokens.group_box)
+            .text_color(theme.foreground)
             .overflow_hidden()
             // Area formulir yang dapat di-scroll
             .child(
                 v_flex()
                     .id("form-scroll-body")
                     .flex_1()
+                    .w_full()
+                    .min_h_0()
+                    .min_w_0()
                     .gap_4()
                     .p_4()
                     .overflow_y_scroll()
                     .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(if selected_id.is_some() {
-                                "Edit Profil"
-                            } else {
-                                "Tambah Profil Baru"
-                            }),
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                if selected_id.is_some() {
+                                    Icon::new(IconName::Settings2).size_4().text_color(theme.primary)
+                                } else {
+                                    Icon::new(IconName::Plus).size_4().text_color(theme.primary)
+                                },
+                            )
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_base()
+                                    .text_color(theme.foreground)
+                                    .child(if selected_id.is_some() {
+                                        "Edit Profil"
+                                    } else {
+                                        "Tambah Profil Baru"
+                                    }),
+                            ),
                     )
             // Field Nama Profil
             .child(
                 v_flex()
+                    .w_full()
                     .gap_1()
-                    .child(div().text_sm().child("Nama Profil:"))
+                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child("Nama Profil:"))
                     .child(Input::new(&self.name_input)),
             )
             // Subkomponen Browser Picker
@@ -130,11 +152,14 @@ impl WindowHopView {
             // Field URL Antrian Poliklinik
             .child(
                 v_flex()
+                    .w_full()
                     .gap_1()
                     .child(
                         h_flex()
                             .justify_between()
                             .items_center()
+                            .flex_wrap()
+                            .gap_1()
                             .child(
                                 div()
                                     .text_sm()
@@ -155,13 +180,16 @@ impl WindowHopView {
                 h_flex()
                     .justify_between()
                     .items_center()
+                    .gap_3()
                     .p_3()
                     .rounded_md()
-                    .bg(shadcn.muted.opacity(0.15))
+                    .bg(theme.tokens.group_box)
                     .border_1()
-                    .border_color(shadcn.border)
+                    .border_color(theme.border)
                     .child(
                         v_flex()
+                            .flex_1()
+                            .min_w_0()
                             .gap_0p5()
                             .child(
                                 div()
@@ -178,6 +206,7 @@ impl WindowHopView {
                     )
                     .child(
                         Switch::new("switch-kiosk")
+                            .flex_shrink_0()
                             .checked(self.kiosk_mode)
                             .disabled(is_busy)
                             .on_change(cx.listener(|this, checked, _, cx| {
@@ -189,12 +218,20 @@ impl WindowHopView {
             // Parameter Baris Perintah Kustom Tingkat Lanjut (Collapsible / Accordion)
             .child(
                 v_flex()
+                    .w_full()
                     .gap_2()
                     .child(
                         h_flex()
                             .id("toggle-advanced-params")
                             .justify_between()
                             .items_center()
+                            .flex_wrap()
+                            .gap_2()
+                            .p_2()
+                            .rounded_md()
+                            .bg(theme.tokens.group_box)
+                            .border_1()
+                            .border_color(theme.border)
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.is_advanced_params_open = !this.is_advanced_params_open;
@@ -205,10 +242,11 @@ impl WindowHopView {
                                     .gap_2()
                                     .items_center()
                                     .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child(if self.is_advanced_params_open { "▼" } else { "▶" }),
+                                        if self.is_advanced_params_open {
+                                            Icon::new(IconName::ChevronDown).size_3p5().text_color(theme.muted_foreground)
+                                        } else {
+                                            Icon::new(IconName::ChevronRight).size_3p5().text_color(theme.muted_foreground)
+                                        },
                                     )
                                     .child(
                                         div()
@@ -230,9 +268,9 @@ impl WindowHopView {
                                 .gap_2()
                                 .p_3()
                                 .rounded_md()
-                                .bg(shadcn.muted.opacity(0.1))
+                                .bg(theme.tokens.group_box)
                                 .border_1()
-                                .border_color(shadcn.border)
+                                .border_color(theme.border)
                                 .child(
                                     div()
                                         .text_xs()
@@ -242,29 +280,8 @@ impl WindowHopView {
                                 .child(Input::new(&self.advanced_params_input))
                                 .when_some(self.advanced_params_error.as_ref(), |this, err| {
                                     this.child(
-                                        div()
-                                            .p_2()
-                                            .rounded_md()
-                                            .bg(theme.danger.opacity(0.12))
-                                            .border_1()
-                                            .border_color(theme.danger)
-                                            .child(
-                                                v_flex()
-                                                    .gap_0p5()
-                                                    .child(
-                                                        div()
-                                                            .text_xs()
-                                                            .font_weight(FontWeight::SEMIBOLD)
-                                                            .text_color(theme.danger)
-                                                            .child("⚠ Parameter Isolasi Terlarang Ditolak"),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_xs()
-                                                            .text_color(theme.danger)
-                                                            .child(err.clone()),
-                                                    ),
-                                            ),
+                                        Alert::error("advanced-params-error", err.clone())
+                                            .title("Parameter Isolasi Terlarang Ditolak"),
                                     )
                                 }),
                         )
@@ -279,42 +296,14 @@ impl WindowHopView {
                     let has_changes = self.cached_has_running_changes.contains(pid);
 
                     let mut container = v_flex().gap_2().child(
-                        div()
-                            .p_3()
-                            .rounded_md()
-                            .bg(theme.primary.opacity(0.12))
-                            .border_1()
-                            .border_color(theme.primary)
-                            .text_xs()
-                            .text_color(theme.primary)
-                            .child("● Profil ini sedang aktif berjalan pada monitor tujuan."),
+                        Alert::info("notice-profile-active", "Profil ini sedang aktif berjalan pada monitor tujuan.")
+                            .title("Status Profil"),
                     );
 
                     if has_changes {
                         container = container.child(
-                            div()
-                                .id("notice-unapplied-changes")
-                                .p_3()
-                                .rounded_md()
-                                .bg(theme.warning.opacity(0.12))
-                                .border_1()
-                                .border_color(theme.warning)
-                                .child(
-                                    v_flex()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(FontWeight::BOLD)
-                                                .text_color(theme.warning)
-                                                .child("ℹ Perubahan Konfigurasi Belum Diterapkan"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .child("Konfigurasi profil telah diubah dan disimpan, tetapi tayangan antrian saat ini masih menggunakan konfigurasi lama. Klik 'Jalankan Ulang' untuk menerapkan konfigurasi terbaru ke monitor tujuan."),
-                                        ),
-                                ),
+                            Alert::warning("notice-unapplied-changes", "Konfigurasi profil telah diubah dan disimpan, tetapi tayangan antrian saat ini masih menggunakan konfigurasi lama. Klik 'Terapkan & Muat Ulang' untuk menerapkan konfigurasi terbaru ke monitor tujuan.")
+                                .title("Perubahan Konfigurasi Belum Diterapkan"),
                         );
                     }
 
@@ -334,18 +323,11 @@ impl WindowHopView {
 
                     if let Some(other) = conflicting_profile {
                         this.child(
-                            div()
-                                .p_3()
-                                .rounded_md()
-                                .bg(theme.warning.opacity(0.12))
-                                .border_1()
-                                .border_color(theme.warning)
-                                .text_xs()
-                                .text_color(theme.warning)
-                                .child(format!(
-                                    "ℹ Monitor tujuan saat ini sedang aktif digunakan oleh profil '{}'. Mengaktifkan profil ini akan menutup profil tersebut terlebih dahulu.",
-                                    other.name()
-                                )),
+                            Alert::warning("notice-conflicting-profile", format!(
+                                "Monitor tujuan saat ini sedang aktif digunakan oleh profil '{}'. Mengaktifkan profil ini akan menutup profil tersebut terlebih dahulu.",
+                                other.name()
+                            ))
+                            .title("Peringatan Penguasaan Monitor"),
                         )
                     } else {
                         this
@@ -366,13 +348,19 @@ impl WindowHopView {
                         .child(
                             h_flex()
                                 .gap_2()
+                                .items_center()
+                                .w_full()
                                 .child(
                                     div()
                                         .flex_1()
+                                        .min_w_0()
                                         .child(Input::new(&self.shortcut_folder_input)),
                                 )
                                 .child(
                                     Button::new("btn-browse-shortcut-folder")
+                                        .flex_shrink_0()
+                                        .outline()
+                                        .icon(IconName::FolderOpen)
                                         .label("Pilih Folder...")
                                         .disabled(is_busy)
                                         .on_click(cx.listener(|this, _, _, cx| {
@@ -396,26 +384,30 @@ impl WindowHopView {
                         .id("startup-settings-card")
                         .justify_between()
                         .items_center()
+                        .gap_3()
                         .p_3()
                         .rounded_md()
                         .bg(if is_this_startup {
                             theme.warning.opacity(0.12)
                         } else {
-                            shadcn.muted.opacity(0.15)
+                            *theme.tokens.group_box
                         })
                         .border_1()
                         .border_color(if is_this_startup {
                             theme.warning
                         } else {
-                            shadcn.border
+                            theme.border
                         })
                         .child(
                             v_flex()
+                                .flex_1()
+                                .min_w_0()
                                 .gap_1()
                                 .child(
                                     h_flex()
                                         .gap_2()
                                         .items_center()
+                                        .flex_wrap()
                                         .child(
                                             div()
                                                 .text_sm()
@@ -457,6 +449,7 @@ impl WindowHopView {
                         )
                         .child(
                             Switch::new("switch-startup-profile")
+                                .flex_shrink_0()
                                 .checked(is_this_startup)
                                 .disabled(is_busy)
                                 .on_change(cx.listener(move |this, checked, _, cx| {

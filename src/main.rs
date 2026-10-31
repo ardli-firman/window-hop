@@ -95,8 +95,10 @@ fn main() {
 
     let (event_tx, event_rx) = async_channel::unbounded::<AppEvent>();
 
-    gpui_kit::application().run(move |cx| {
-        gpui_kit::init(cx);
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(move |cx| {
+            gpui_kit::init(cx);
         // Menjaga aplikasi tetap berjalan di system tray meskipun jendela pengaturan belum dibuka atau ditutup
         cx.set_quit_mode(QuitMode::Explicit);
 
