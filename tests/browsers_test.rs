@@ -3,7 +3,8 @@ use window_hop::browsers::{
     detect_browser_support, evaluate_browser_compatibility, is_brave_executable,
     is_firefox_executable, parse_windows_command_line, read_executable_architecture, BraveAdapter,
     BrowserArchitecture, BrowserCompatibilityStatus, BrowserError, BrowserSupportStatus,
-    ChromeAdapter, DetectedBrowser, EdgeAdapter, FirefoxAdapter, LoginRetentionNote,
+    ChromeAdapter, DetectedBrowser, EdgeAdapter, FirefoxAdapter, LaunchParameters,
+    LoginRetentionNote,
 };
 
 #[test]
@@ -1065,4 +1066,145 @@ fn test_evaluate_browser_compatibility_distinguishes_verified_unverified_and_una
         }
         other => panic!("expected SafeToActivate with version, got {:?}", other),
     }
+}
+
+#[test]
+fn test_smart_bidirectional_parser_extracts_app_url_and_kiosk() {
+    // 1. Standard Chrome / Edge format
+    let p = LaunchParameters::parse("--app=https://antrian.poli/gigi --kiosk").unwrap();
+    assert_eq!(p.url, "https://antrian.poli/gigi");
+    assert!(p.kiosk);
+    assert_eq!(p.advanced_parameters, "");
+
+    // 2. Reversed order
+    let p2 = LaunchParameters::parse("--kiosk --app=https://queue.local").unwrap();
+    assert_eq!(p2.url, "https://queue.local");
+    assert!(p2.kiosk);
+    assert_eq!(p2.advanced_parameters, "");
+
+    // 3. Quoted URL with spaces
+    let p3 = LaunchParameters::parse(r#"--app="https://antrian.poli/display 1" --kiosk"#).unwrap();
+    assert_eq!(p3.url, "https://antrian.poli/display 1");
+    assert!(p3.kiosk);
+    assert_eq!(p3.advanced_parameters, "");
+
+    // 4. Two-token --app argument
+    let p4 = LaunchParameters::parse("--app https://antrian.poli/umum").unwrap();
+    assert_eq!(p4.url, "https://antrian.poli/umum");
+    assert!(!p4.kiosk);
+    assert_eq!(p4.advanced_parameters, "");
+
+    // 5. Raw URL without --app flag
+    let p5 = LaunchParameters::parse("https://antrian.rumahsakit.local/poli --kiosk").unwrap();
+    assert_eq!(p5.url, "https://antrian.rumahsakit.local/poli");
+    assert!(p5.kiosk);
+    assert_eq!(p5.advanced_parameters, "");
+
+    // 6. Only kiosk flag
+    let p6 = LaunchParameters::parse("--kiosk").unwrap();
+    assert_eq!(p6.url, "");
+    assert!(p6.kiosk);
+    assert_eq!(p6.advanced_parameters, "");
+
+    // 7. Empty string
+    let p7 = LaunchParameters::parse("").unwrap();
+    assert_eq!(p7.url, "");
+    assert!(!p7.kiosk);
+    assert_eq!(p7.advanced_parameters, "");
+}
+
+#[test]
+fn test_smart_bidirectional_parser_preserves_advanced_parameters() {
+    // Advanced parameters are kept intact
+    let p = LaunchParameters::parse("--app=https://antrian.local --kiosk --disable-gpu --lang=id")
+        .unwrap();
+    assert_eq!(p.url, "https://antrian.local");
+    assert!(p.kiosk);
+    assert_eq!(p.advanced_parameters, "--disable-gpu --lang=id");
+
+    // Interleaved order preserves non-app and non-kiosk flags
+    let p2 = LaunchParameters::parse(
+        "--disable-features=Translate --kiosk --app=https://antrian.local --incognito",
+    )
+    .unwrap();
+    assert_eq!(p2.url, "https://antrian.local");
+    assert!(p2.kiosk);
+    assert_eq!(
+        p2.advanced_parameters,
+        "--disable-features=Translate --incognito"
+    );
+
+    // Quoted values in advanced parameters
+    let p3 = LaunchParameters::parse(
+        r#"--app=https://antrian.local --custom-flag="hello world" --kiosk"#,
+    )
+    .unwrap();
+    assert_eq!(p3.url, "https://antrian.local");
+    assert!(p3.kiosk);
+    assert_eq!(p3.advanced_parameters, r#"--custom-flag="hello world""#);
+}
+
+#[test]
+fn test_smart_bidirectional_parser_roundtrip_composition() {
+    // 1. Standard compose
+    let lp = LaunchParameters::new("https://antrian.poli/gigi", true, "--disable-gpu");
+    let composed = lp.compose();
+    assert_eq!(
+        composed,
+        "--app=https://antrian.poli/gigi --kiosk --disable-gpu"
+    );
+    let reparsed = LaunchParameters::parse(&composed).unwrap();
+    assert_eq!(reparsed, lp);
+
+    // 2. URL with space requires quotes
+    let lp2 = LaunchParameters::new("https://antrian.poli/display 1", false, "");
+    let composed2 = lp2.compose();
+    assert_eq!(composed2, r#"--app="https://antrian.poli/display 1""#);
+    let reparsed2 = LaunchParameters::parse(&composed2).unwrap();
+    assert_eq!(reparsed2, lp2);
+
+    // 3. No URL, only kiosk and advanced
+    let lp3 = LaunchParameters::new("", true, "--inprivate");
+    let composed3 = lp3.compose();
+    assert_eq!(composed3, "--kiosk --inprivate");
+    let reparsed3 = LaunchParameters::parse(&composed3).unwrap();
+    assert_eq!(reparsed3, lp3);
+
+    // 4. Empty
+    let lp4 = LaunchParameters::new("", false, "");
+    assert_eq!(lp4.compose(), "");
+    assert_eq!(LaunchParameters::parse("").unwrap(), lp4);
+}
+
+#[test]
+fn test_smart_bidirectional_parser_rejects_conflicting_isolation_parameters() {
+    // Chromium conflicting isolation arguments rejected
+    let lp = LaunchParameters::new("https://antrian.local", true, "--user-data-dir=C:\\custom");
+    let err = lp.validate_isolation(None).unwrap_err();
+    match err {
+        BrowserError::ConflictingIsolationParameter { arg, .. } => {
+            assert!(arg.contains("--user-data-dir"));
+        }
+        other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
+    }
+
+    // Profile-directory rejected
+    let lp2 = LaunchParameters::new(
+        "https://antrian.local",
+        false,
+        r#"--profile-directory="Profile 1""#,
+    );
+    assert!(lp2.validate_isolation(None).is_err());
+
+    // Firefox conflicting arguments rejected
+    let lp3 = LaunchParameters::new(
+        "https://antrian.local",
+        true,
+        "-profile C:\\firefox_profile",
+    );
+    assert!(lp3.validate_isolation(None).is_err());
+
+    // Safe parameters pass validation
+    let lp_ok = LaunchParameters::new("https://antrian.local", true, "--disable-gpu --lang=id");
+    assert!(lp_ok.validate_isolation(None).is_ok());
 }

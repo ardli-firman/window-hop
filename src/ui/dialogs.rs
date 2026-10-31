@@ -185,6 +185,8 @@ impl WindowHopView {
         let window_handle = self.window_handle;
         let name_input = self.name_input.clone();
         let path_input = self.path_input.clone();
+        let url_input = self.url_input.clone();
+        let advanced_params_input = self.advanced_params_input.clone();
         let params_input = self.params_input.clone();
 
         cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
@@ -214,11 +216,20 @@ impl WindowHopView {
                                 // Bersihkan formulir dan seleksi profil
                                 view.selected_profile_id = None;
                                 view.selected_target_monitor = None;
+                                view.kiosk_mode = true;
+                                view.is_advanced_params_open = false;
+                                view.advanced_params_error = None;
                                 let _ = window_handle.update(cx, |_view, window, cx| {
                                     name_input.update(cx, |input, cx| {
                                         input.set_value("", window, cx);
                                     });
                                     path_input.update(cx, |input, cx| {
+                                        input.set_value("", window, cx);
+                                    });
+                                    url_input.update(cx, |input, cx| {
+                                        input.set_value("", window, cx);
+                                    });
+                                    advanced_params_input.update(cx, |input, cx| {
                                         input.set_value("", window, cx);
                                     });
                                     params_input.update(cx, |input, cx| {

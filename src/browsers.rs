@@ -101,6 +101,185 @@ pub fn parse_windows_command_line(input: &str) -> Result<Vec<String>, BrowserErr
     Ok(args)
 }
 
+/// Parameter peluncuran yang dipetakan secara dua arah (bi-directional) antara field
+/// domain `custom_parameters` dengan UI form: URL antrian, switch kiosk, dan parameter tingkat lanjut.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LaunchParameters {
+    pub url: String,
+    pub kiosk: bool,
+    pub advanced_parameters: String,
+}
+
+impl LaunchParameters {
+    /// Membuat struktur parameter peluncuran baru.
+    pub fn new(
+        url: impl Into<String>,
+        kiosk: bool,
+        advanced_parameters: impl Into<String>,
+    ) -> Self {
+        Self {
+            url: url.into(),
+            kiosk,
+            advanced_parameters: advanced_parameters.into(),
+        }
+    }
+
+    /// Melakukan parsing dua arah dari raw string `custom_parameters`.
+    ///
+    /// Mengekstrak flag `--app` (atau `--app=URL`, `--app="URL"`, `-app`, `/app`) menjadi field `url`,
+    /// flag `--kiosk` (atau `-kiosk`, `/kiosk`) menjadi boolean `kiosk`,
+    /// serta mempertahankan parameter baris perintah lainnya secara utuh dalam `advanced_parameters`.
+    pub fn parse(input: &str) -> Result<Self, BrowserError> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Ok(Self::default());
+        }
+
+        let parsed_tokens = parse_windows_command_line(trimmed)?;
+        let mut url = String::new();
+        let mut kiosk = false;
+        let mut advanced_tokens = Vec::new();
+
+        let mut i = 0;
+        while i < parsed_tokens.len() {
+            let token = &parsed_tokens[i];
+            let lower = token.to_ascii_lowercase();
+
+            // Cek kiosk flag (--kiosk, -kiosk, /kiosk)
+            if lower == "--kiosk" || lower == "-kiosk" || lower == "/kiosk" {
+                kiosk = true;
+                i += 1;
+                continue;
+            }
+
+            // Cek app flag dengan format key=val: --app=URL, -app=URL, /app=URL
+            let is_app_prefix = lower.starts_with("--app=")
+                || lower.starts_with("-app=")
+                || lower.starts_with("/app=");
+            if is_app_prefix {
+                let eq_idx = token.find('=').unwrap();
+                let extracted_url = token[eq_idx + 1..].trim();
+                if url.is_empty() {
+                    url = extracted_url.to_string();
+                } else {
+                    advanced_tokens.push(token.clone());
+                }
+                i += 1;
+                continue;
+            }
+
+            // Cek two-token app: --app <URL>, -app <URL>, /app <URL>
+            if (lower == "--app" || lower == "-app" || lower == "/app")
+                && i + 1 < parsed_tokens.len()
+            {
+                if url.is_empty() {
+                    url = parsed_tokens[i + 1].trim().to_string();
+                } else {
+                    advanced_tokens.push(token.clone());
+                    advanced_tokens.push(parsed_tokens[i + 1].clone());
+                }
+                i += 2;
+                continue;
+            }
+
+            // Cek raw URL tanpa flag --app jika url belum terisi
+            if url.is_empty() && (lower.starts_with("http://") || lower.starts_with("https://")) {
+                url = token.trim().to_string();
+                i += 1;
+                continue;
+            }
+
+            // Selain itu adalah advanced parameter
+            advanced_tokens.push(token.clone());
+            i += 1;
+        }
+
+        // Susun kembali advanced_tokens menjadi string yang rapi dan memelihara quoting
+        let mut advanced_parts = Vec::new();
+        for tok in advanced_tokens {
+            if tok.contains(' ') || tok.contains('\t') || tok.contains('"') {
+                if let Some((key, val)) = tok.split_once('=') {
+                    if val.contains(' ') || val.contains('\t') || val.contains('"') {
+                        let escaped = val.replace('\\', "\\\\").replace('"', "\\\"");
+                        advanced_parts.push(format!("{}=\"{}\"", key, escaped));
+                    } else {
+                        advanced_parts.push(tok);
+                    }
+                } else {
+                    let escaped = tok.replace('\\', "\\\\").replace('"', "\\\"");
+                    advanced_parts.push(format!("\"{}\"", escaped));
+                }
+            } else {
+                advanced_parts.push(tok);
+            }
+        }
+        let advanced_parameters = advanced_parts.join(" ");
+
+        Ok(Self {
+            url,
+            kiosk,
+            advanced_parameters,
+        })
+    }
+
+    /// Menyusun kembali field `url`, `kiosk`, dan `advanced_parameters` menjadi satu string `custom_parameters`
+    /// yang siap disimpan ke domain `Profile` atau digunakan untuk peluncuran browser.
+    pub fn compose(&self) -> String {
+        let mut parts = Vec::new();
+
+        let clean_url = self.url.trim();
+        if !clean_url.is_empty() {
+            if clean_url.contains(' ') || clean_url.contains('\t') || clean_url.contains('"') {
+                if clean_url.contains('"') {
+                    let escaped = clean_url.replace('\\', "\\\\").replace('"', "\\\"");
+                    parts.push(format!("--app=\"{}\"", escaped));
+                } else {
+                    parts.push(format!("--app=\"{}\"", clean_url));
+                }
+            } else {
+                parts.push(format!("--app={}", clean_url));
+            }
+        }
+
+        if self.kiosk {
+            parts.push("--kiosk".to_string());
+        }
+
+        let clean_adv = self.advanced_parameters.trim();
+        if !clean_adv.is_empty() {
+            parts.push(clean_adv.to_string());
+        }
+
+        parts.join(" ")
+    }
+
+    /// Helper statis untuk menyusun langsung dari komponen parameter.
+    pub fn compose_from(url: &str, kiosk: bool, advanced_parameters: &str) -> String {
+        Self::new(url, kiosk, advanced_parameters).compose()
+    }
+
+    /// Memvalidasi apakah parameter tingkat lanjut mengandung argumen terlarang yang berbenturan
+    /// dengan isolasi sesi browser profil.
+    pub fn validate_isolation(&self, adapter: Option<&BrowserAdapter>) -> Result<(), BrowserError> {
+        let trimmed_adv = self.advanced_parameters.trim();
+        if trimmed_adv.is_empty() {
+            return Ok(());
+        }
+
+        let parsed = parse_windows_command_line(trimmed_adv)?;
+
+        if let Some(ad) = adapter {
+            ad.validate_parsed_arguments(&parsed)?;
+        } else {
+            // Validasi umum terhadap semua prefix isolasi sesi Chromium dan Firefox
+            validate_chromium_arguments(&parsed)?;
+            validate_firefox_arguments(&parsed)?;
+        }
+
+        Ok(())
+    }
+}
+
 /// Catatan retensi login/sesi berdasarkan mode browser yang dipilih.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginRetentionNote {
