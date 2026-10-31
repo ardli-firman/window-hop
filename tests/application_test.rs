@@ -8165,3 +8165,67 @@ fn test_shortcut_and_startup_activation_with_brave() {
         "Already running instance is reused during startup activation"
     );
 }
+
+#[test]
+fn test_find_monitor_occupying_profile() {
+    let dir = tempdir().expect("tempdir");
+    let store = Arc::new(MemoryProfileStore::new());
+    let target_mon = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE"),
+        name: "Queue Display".to_string(),
+        is_primary: false,
+    };
+    let monitor_provider = Arc::new(MockMonitorProvider::new(vec![
+        MonitorDescriptor {
+            identity: MonitorIdentity::new("MON-PRIMARY"),
+            name: "Workstation Main Display".to_string(),
+            is_primary: true,
+        },
+        target_mon,
+    ]));
+    let launcher = Arc::new(MockProcessLauncher::new());
+    let clock = Arc::new(MockClock::new());
+    let base_dir = dir.path().join("base_data");
+
+    let mut coordinator =
+        LifecycleCoordinator::with_services(store, monitor_provider, launcher, clock, base_dir);
+
+    let chrome_exe = create_mock_pe_executable(dir.path(), "chrome.exe", 0x8664);
+
+    let p1 = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new("Poli Umum", chrome_exe.clone(), "")
+                .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
+        )
+        .expect("save p1");
+
+    let p2 = coordinator
+        .save_draft_profile(
+            None,
+            DraftProfileInput::new("Poli Anak", chrome_exe, "")
+                .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
+        )
+        .expect("save p2");
+
+    // Before activation, no profile is occupying MON-QUEUE
+    assert_eq!(
+        coordinator.find_monitor_occupying_profile(&MonitorIdentity::new("MON-QUEUE"), Some(&p2)),
+        None
+    );
+
+    // Activate P1 on MON-QUEUE
+    coordinator.activate_profile(&p1).expect("activate p1");
+
+    // While editing P2, MON-QUEUE is occupied by "Poli Umum"
+    assert_eq!(
+        coordinator.find_monitor_occupying_profile(&MonitorIdentity::new("MON-QUEUE"), Some(&p2)),
+        Some("Poli Umum".to_string())
+    );
+
+    // While editing P1 itself, exclude_profile ignores P1
+    assert_eq!(
+        coordinator.find_monitor_occupying_profile(&MonitorIdentity::new("MON-QUEUE"), Some(&p1)),
+        None
+    );
+}

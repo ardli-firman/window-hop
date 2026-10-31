@@ -32,6 +32,10 @@ pub(crate) mod monitor_card;
 pub mod sidebar;
 pub mod tokens;
 
+pub use monitor_card::{
+    find_occupying_profile, MonitorCardModel, DISCONNECTED_BADGE, DISCONNECTED_WARNING,
+    MONITOR_POLL_INTERVAL, NURSE_PRIMARY_BADGE, NURSE_PRIMARY_WARNING, RECOMMENDED_QUEUE_BADGE,
+};
 pub use tokens::*;
 
 /// Tampilan utama pengaturan profil Window Hop.
@@ -163,6 +167,57 @@ impl WindowHopView {
                 .collect();
             (states, running, changes)
         };
+
+        // Background polling berkala (2.5 detik) untuk mendeteksi perubahan sambungan kabel HDMI/VGA
+        let polling_coordinator = coordinator.clone();
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                loop {
+                    cx.background_executor()
+                        .timer(crate::ui::monitor_card::MONITOR_POLL_INTERVAL)
+                        .await;
+
+                    let Some(view_entity) = this.upgrade() else {
+                        break;
+                    };
+
+                    let coord_arc = polling_coordinator.clone();
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            if let Ok(coord) = coord_arc.try_lock() {
+                                Some(coord.available_monitors())
+                            } else {
+                                None
+                            }
+                        })
+                        .await;
+
+                    if let Some(res) = result {
+                        cx.update(|cx| {
+                            view_entity.update(cx, |view, cx| match res {
+                                Ok(monitors) => {
+                                    if view.cached_monitors != monitors {
+                                        view.cached_monitors = monitors;
+                                        view.monitors_error = None;
+                                        cx.notify();
+                                    }
+                                }
+                                Err(err) => {
+                                    let err_str = err.to_string();
+                                    if view.monitors_error.as_deref() != Some(&err_str) {
+                                        view.monitors_error = Some(err_str);
+                                        cx.notify();
+                                    }
+                                }
+                            });
+                        });
+                    }
+                }
+            }
+        })
+        .detach();
 
         Self {
             coordinator,

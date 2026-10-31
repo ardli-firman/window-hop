@@ -6,7 +6,7 @@ use gpui_kit::component::tag::TagVariant;
 use gpui_kit::px;
 use window_hop::domain::{
     ExitReason, MonitorDescriptor, MonitorIdentity, ProcessId, Profile, ProfileId,
-    ProfileLifecycleState, ProfileStatus,
+    ProfileLifecycleState, ProfileStatus, TargetMonitorStatus,
 };
 use window_hop::ui::sidebar::{
     filter_profiles_by_query, profile_has_unsaved_changes, should_show_profile_search,
@@ -17,7 +17,11 @@ use window_hop::ui::tokens::{
     ShadcnTokens, SIDEBAR_WIDTH, WINDOW_INITIAL_HEIGHT, WINDOW_INITIAL_WIDTH, WINDOW_MIN_HEIGHT,
     WINDOW_MIN_WIDTH,
 };
-use window_hop::ui::WindowHopView;
+use window_hop::ui::{
+    find_occupying_profile, MonitorCardModel, WindowHopView, DISCONNECTED_BADGE,
+    DISCONNECTED_WARNING, MONITOR_POLL_INTERVAL, NURSE_PRIMARY_BADGE, NURSE_PRIMARY_WARNING,
+    RECOMMENDED_QUEUE_BADGE,
+};
 
 #[test]
 fn test_window_initial_and_minimum_dimensions_match_spec() {
@@ -283,4 +287,248 @@ fn test_search_box_threshold_and_instant_filtering() {
 
     let res = filter_profiles_by_query(&profiles, "Laboratorium");
     assert!(res.is_empty());
+}
+
+#[test]
+fn test_monitor_card_model_badges_and_resolution() {
+    let primary_desc = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-PRIMARY"),
+        name: "Dell P2419H".to_string(),
+        is_primary: true,
+    };
+    let secondary_desc = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE"),
+        name: "LG TV 43 Inch".to_string(),
+        is_primary: false,
+    };
+
+    // 1. Primary nurse screen gets gray badge [Layar Utama Perawat]
+    let primary_card = MonitorCardModel::from_descriptor(&primary_desc, false, false, None);
+    assert_eq!(primary_card.identity, MonitorIdentity::new("MON-PRIMARY"));
+    assert_eq!(primary_card.name, "Dell P2419H");
+    assert_eq!(primary_card.resolution, "1920 × 1080");
+    assert_eq!(
+        primary_card.role_badge(),
+        Some((NURSE_PRIMARY_BADGE, TagVariant::Secondary))
+    );
+
+    // 2. Queue monitor gets green badge [Monitor Antrian Rekomendasi]
+    let secondary_card = MonitorCardModel::from_descriptor(&secondary_desc, true, true, None)
+        .with_resolution("3840 × 2160");
+    assert_eq!(secondary_card.resolution, "3840 × 2160");
+    assert_eq!(
+        secondary_card.role_badge(),
+        Some((RECOMMENDED_QUEUE_BADGE, TagVariant::Success))
+    );
+
+    // 3. Disconnected monitor gets warning badge [Terputus]
+    let disconnected_card = MonitorCardModel::new_disconnected(
+        MonitorIdentity::new("MON-LOST"),
+        "Monitor Antrian Poli",
+        true,
+        None,
+    );
+    assert!(!disconnected_card.is_connected);
+    assert_eq!(
+        disconnected_card.role_badge(),
+        Some((DISCONNECTED_BADGE, TagVariant::Warning))
+    );
+}
+
+#[test]
+fn test_nurse_primary_screen_guard_and_selection_warning() {
+    let primary_desc = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-PRIMARY"),
+        name: "Layar Kerja Perawat".to_string(),
+        is_primary: true,
+    };
+    let secondary_desc = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE"),
+        name: "Monitor Antrian".to_string(),
+        is_primary: false,
+    };
+
+    // When primary monitor is NOT selected, no selection warning is triggered
+    let unselected_primary = MonitorCardModel::from_descriptor(&primary_desc, false, false, None);
+    assert_eq!(unselected_primary.selection_warning(), None);
+
+    // When primary monitor IS selected, protection guard warning is emitted
+    let selected_primary = MonitorCardModel::from_descriptor(&primary_desc, false, true, None);
+    assert_eq!(
+        selected_primary.selection_warning(),
+        Some(NURSE_PRIMARY_WARNING)
+    );
+
+    // When queue monitor IS selected, no primary warning is triggered
+    let selected_secondary = MonitorCardModel::from_descriptor(&secondary_desc, true, true, None);
+    assert_eq!(selected_secondary.selection_warning(), None);
+}
+
+#[test]
+fn test_active_profile_monitor_ownership_detection() {
+    let mut profiles = vec![
+        Profile::new_draft(
+            ProfileId::new("p1"),
+            "Poli Umum",
+            PathBuf::from("chrome.exe"),
+            "",
+        ),
+        Profile::new_draft(
+            ProfileId::new("p2"),
+            "Poli Anak",
+            PathBuf::from("chrome.exe"),
+            "",
+        ),
+    ];
+    profiles[0].set_target_monitor(Some(MonitorIdentity::new("MON-1")));
+    profiles[1].set_target_monitor(Some(MonitorIdentity::new("MON-2")));
+
+    let queue_mon_desc = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-2"),
+        name: "Monitor Antrian Poli".to_string(),
+        is_primary: false,
+    };
+
+    let mut lifecycle_states = std::collections::HashMap::new();
+    // Profile p2 (Poli Anak) is actively running on MON-2
+    lifecycle_states.insert(
+        ProfileId::new("p2"),
+        ProfileLifecycleState::Running {
+            pid: ProcessId::new(4567),
+            target_monitor: queue_mon_desc.clone(),
+        },
+    );
+
+    // 1. When editing Profile p1 (Poli Umum), MON-2 is occupied by "Poli Anak"
+    let occupying = find_occupying_profile(
+        &MonitorIdentity::new("MON-2"),
+        Some(&ProfileId::new("p1")),
+        &profiles,
+        &lifecycle_states,
+    );
+    assert_eq!(occupying, Some("Poli Anak"));
+
+    let card = MonitorCardModel::from_descriptor(
+        &queue_mon_desc,
+        true,
+        false,
+        occupying.map(String::from),
+    );
+    assert_eq!(
+        card.occupancy_text(),
+        Some("Dikuasai oleh profil: Poli Anak".to_string())
+    );
+
+    // 2. When editing Profile p2 itself, it should not report self-conflict
+    let occupying_self = find_occupying_profile(
+        &MonitorIdentity::new("MON-2"),
+        Some(&ProfileId::new("p2")),
+        &profiles,
+        &lifecycle_states,
+    );
+    assert_eq!(occupying_self, None);
+
+    // 3. When querying an unoccupied monitor (MON-1), returns None
+    let occupying_mon1 = find_occupying_profile(
+        &MonitorIdentity::new("MON-1"),
+        Some(&ProfileId::new("p2")),
+        &profiles,
+        &lifecycle_states,
+    );
+    assert_eq!(occupying_mon1, None);
+}
+
+#[test]
+fn test_disconnected_monitor_visual_properties_and_no_fallback() {
+    let disconnected_card = MonitorCardModel::new_disconnected(
+        MonitorIdentity::new("MON-DISCONNECTED"),
+        "Monitor Antrian IGD",
+        true,
+        None,
+    );
+
+    assert!(!disconnected_card.is_connected);
+    assert!(disconnected_card.is_dashed_border());
+    assert!(disconnected_card.is_dimmed());
+    assert_eq!(
+        disconnected_card.role_badge(),
+        Some((DISCONNECTED_BADGE, TagVariant::Warning))
+    );
+    assert_eq!(
+        disconnected_card.disconnected_warning(),
+        Some(DISCONNECTED_WARNING)
+    );
+
+    // Connected monitor should NOT have dashed border or dimmed style or disconnected warning
+    let connected_card = MonitorCardModel::from_descriptor(
+        &MonitorDescriptor {
+            identity: MonitorIdentity::new("MON-OK"),
+            name: "Monitor Antrian Poli".to_string(),
+            is_primary: false,
+        },
+        true,
+        true,
+        None,
+    );
+    assert!(connected_card.is_connected);
+    assert!(!connected_card.is_dashed_border());
+    assert!(!connected_card.is_dimmed());
+    assert_eq!(connected_card.disconnected_warning(), None);
+}
+
+#[test]
+fn test_monitor_polling_interval_and_cable_change_detection() {
+    use std::time::Duration;
+
+    // 1. Verify background polling interval is between 2 and 3 seconds as specified
+    assert!(MONITOR_POLL_INTERVAL >= Duration::from_secs(2));
+    assert!(MONITOR_POLL_INTERVAL <= Duration::from_secs(3));
+
+    // 2. Test dynamic detection of cable disconnect and reconnection without fallback to primary
+    let primary_mon = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-PRIMARY"),
+        name: "Layar Utama Perawat".to_string(),
+        is_primary: true,
+    };
+    let queue_mon = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE"),
+        name: "Monitor Antrian".to_string(),
+        is_primary: false,
+    };
+
+    // State A: Both cables connected
+    let available_a = vec![primary_mon.clone(), queue_mon.clone()];
+    let target_id = MonitorIdentity::new("MON-QUEUE");
+
+    // Evaluate target monitor: should be uniquely available
+    let status_a = TargetMonitorStatus::evaluate(Some(&target_id), &available_a);
+    match status_a {
+        TargetMonitorStatus::Available(desc) => {
+            assert_eq!(desc.identity, target_id);
+            assert_eq!(desc.name, "Monitor Antrian");
+        }
+        other => panic!("expected Available, got {:?}", other),
+    }
+
+    // State B: HDMI/VGA cable unplugged (queue monitor disconnected)
+    let available_b = vec![primary_mon.clone()];
+    let status_b = TargetMonitorStatus::evaluate(Some(&target_id), &available_b);
+    match status_b {
+        TargetMonitorStatus::Unavailable { recorded_identity } => {
+            assert_eq!(recorded_identity, target_id);
+            // Must NOT fallback to primary monitor!
+            assert_ne!(recorded_identity, primary_mon.identity);
+        }
+        other => panic!("expected Unavailable without fallback, got {:?}", other),
+    }
+
+    // State C: HDMI/VGA cable plugged back in
+    let available_c = vec![primary_mon.clone(), queue_mon.clone()];
+    let status_c = TargetMonitorStatus::evaluate(Some(&target_id), &available_c);
+    match status_c {
+        TargetMonitorStatus::Available(desc) => {
+            assert_eq!(desc.identity, target_id);
+        }
+        other => panic!("expected Available on reconnect, got {:?}", other),
+    }
 }
