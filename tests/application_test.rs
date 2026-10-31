@@ -576,6 +576,7 @@ fn test_replaced_monitor_with_different_identity_requires_reselection() {
 
 #[test]
 fn test_activate_profile_fails_when_browser_unverified() {
+    let dir = tempdir().expect("tempdir");
     let store = Arc::new(MemoryProfileStore::new());
     let monitor_provider = Arc::new(MockMonitorProvider::new(vec![MonitorDescriptor {
         identity: MonitorIdentity::new("MON-QUEUE"),
@@ -584,7 +585,7 @@ fn test_activate_profile_fails_when_browser_unverified() {
     }]));
     let launcher = Arc::new(MockProcessLauncher::new());
     let clock = Arc::new(MockClock::new());
-    let base_dir = PathBuf::from("/tmp/window_hop_test");
+    let base_dir = dir.path().join("base_data");
 
     let mut coordinator = LifecycleCoordinator::with_services(
         store,
@@ -594,15 +595,13 @@ fn test_activate_profile_fails_when_browser_unverified() {
         base_dir,
     );
 
+    let opera_exe = create_mock_pe_executable(dir.path(), "opera.exe", 0x8664);
+
     let profile_id = coordinator
         .save_draft_profile(
             None,
-            DraftProfileInput::new(
-                "Antrian Gigi Opera",
-                PathBuf::from(r"C:\Program Files\Opera\opera.exe"),
-                "--kiosk",
-            )
-            .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
+            DraftProfileInput::new("Antrian Gigi Opera", opera_exe.clone(), "--kiosk")
+                .with_target_monitor(Some(MonitorIdentity::new("MON-QUEUE"))),
         )
         .expect("save profile");
 
