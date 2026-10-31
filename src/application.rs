@@ -833,6 +833,27 @@ impl LifecycleCoordinator {
             .map_err(ApplicationError::Platform)
     }
 
+    /// Menemukan nama profil aktif lain yang sedang menguasai monitor tertentu.
+    pub fn find_monitor_occupying_profile(
+        &self,
+        monitor_id: &MonitorIdentity,
+        exclude_profile: Option<&ProfileId>,
+    ) -> Option<String> {
+        for profile in self.list_profiles() {
+            if Some(profile.id()) == exclude_profile {
+                continue;
+            }
+            if let Ok(ProfileLifecycleState::Running { target_monitor, .. }) =
+                self.get_lifecycle_state(profile.id())
+            {
+                if &target_monitor.identity == monitor_id {
+                    return Some(profile.name().to_string());
+                }
+            }
+        }
+        None
+    }
+
     /// Mengevaluasi status kecocokan monitor tujuan untuk profil tertentu.
     pub fn get_target_monitor_status(
         &self,
