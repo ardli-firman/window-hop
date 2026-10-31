@@ -1,10 +1,12 @@
 //! Master sidebar navigation column for Window Hop profile management.
 
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::empty::{Empty, EmptyDescription, EmptyHeader, EmptyTitle};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::tag::{Tag as Badge, TagVariant};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable as _};
+use gpui_kit::component::{
+    h_flex, v_flex, ActiveTheme, Disableable as _, Icon, IconName, Sizable as _,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -161,7 +163,7 @@ impl WindowHopView {
     /// Renders the master navigation sidebar (fixed 320 px).
     pub(crate) fn render_sidebar(
         &self,
-        shadcn: &ShadcnTokens,
+        _shadcn: &ShadcnTokens,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().clone();
@@ -175,25 +177,42 @@ impl WindowHopView {
 
         v_flex()
             .w(SIDEBAR_WIDTH)
+            .h_full()
+            .min_h_0()
+            .flex_shrink_0()
+            .overflow_hidden()
             .gap_3()
             .p_4()
             .rounded_lg()
             .border_1()
-            .border_color(shadcn.border)
-            .bg(shadcn.card)
-            .text_color(shadcn.card_foreground)
+            .border_color(theme.border)
+            .bg(theme.tokens.group_box)
+            .text_color(theme.foreground)
             .child(
                 h_flex()
                     .justify_between()
                     .items_center()
                     .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("Daftar Profil ({})", profiles.len())),
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                Icon::new(IconName::LayoutDashboard)
+                                    .size_4()
+                                    .text_color(theme.muted_foreground),
+                            )
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(format!("Daftar Profil ({})", profiles.len())),
+                            ),
                     )
                     .child(
                         Button::new("btn-new-profile")
-                            .label("+ Profil Baru")
+                            .primary()
+                            .small()
+                            .icon(IconName::Plus)
+                            .label("Profil Baru")
                             .disabled(is_busy)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.select_profile(None, window, cx);
@@ -201,34 +220,62 @@ impl WindowHopView {
                     ),
             )
             .when(show_search, |this| {
-                this.child(div().child(Input::new(&self.search_input)))
+                this.child(
+                    div().child(
+                        Input::new(&self.search_input).cleanable(true).prefix(
+                            Icon::new(IconName::Search)
+                                .size_3p5()
+                                .text_color(theme.muted_foreground),
+                        ),
+                    ),
+                )
             })
             .child(if profiles.is_empty() {
-                Empty::new()
-                    .header(
-                        EmptyHeader::new()
-                            .title(EmptyTitle::new().child(EMPTY_STATE_TITLE))
-                            .description(EmptyDescription::new().child(EMPTY_STATE_DESCRIPTION)),
-                    )
+                v_flex()
+                    .flex_1()
+                    .justify_center()
                     .child(
-                        Button::new("btn-empty-new-profile")
-                            .label("+ Buat Profil Pertama")
-                            .disabled(is_busy)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.select_profile(None, window, cx);
-                            })),
+                        Empty::new()
+                            .header(
+                                EmptyHeader::new()
+                                    .title(EmptyTitle::new().child(EMPTY_STATE_TITLE))
+                                    .description(
+                                        EmptyDescription::new().child(EMPTY_STATE_DESCRIPTION),
+                                    ),
+                            )
+                            .child(
+                                Button::new("btn-empty-new-profile")
+                                    .primary()
+                                    .icon(IconName::Plus)
+                                    .label("+ Buat Profil Pertama")
+                                    .disabled(is_busy)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.select_profile(None, window, cx);
+                                    })),
+                            ),
                     )
                     .into_any_element()
             } else if filtered_profiles.is_empty() {
-                div()
+                v_flex()
+                    .flex_1()
+                    .justify_center()
+                    .items_center()
                     .p_4()
-                    .text_sm()
-                    .text_center()
-                    .text_color(shadcn.muted_foreground)
-                    .child("Tidak ada profil yang cocok dengan pencarian.")
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_center()
+                            .text_color(theme.muted_foreground)
+                            .child("Tidak ada profil yang cocok dengan pencarian."),
+                    )
                     .into_any_element()
             } else {
                 v_flex()
+                    .id("sidebar-profiles-list")
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_y_scroll()
                     .gap_2()
                     .children(filtered_profiles.into_iter().map(|p| {
                         let is_selected = selected_id.as_ref() == Some(p.id());
@@ -240,15 +287,10 @@ impl WindowHopView {
                             .cloned()
                             .unwrap_or(ProfileLifecycleState::Idle);
 
-                        let bg = if is_selected {
-                            shadcn.accent.opacity(0.3)
+                        let (bg, border) = if is_selected {
+                            (theme.primary.opacity(0.12), theme.primary)
                         } else {
-                            shadcn.muted.opacity(0.4)
-                        };
-                        let border = if is_selected {
-                            shadcn.primary
-                        } else {
-                            shadcn.border
+                            (theme.muted.opacity(0.2), theme.border)
                         };
                         let item_id = SharedString::from(format!("profile-item-{}", pid));
 
@@ -265,6 +307,7 @@ impl WindowHopView {
                             .border_1()
                             .border_color(border)
                             .bg(bg)
+                            .hover(|s| s.bg(theme.accent.opacity(0.18)))
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.select_profile(Some(select_pid.clone()), window, cx);
@@ -272,24 +315,36 @@ impl WindowHopView {
                             .child(
                                 v_flex()
                                     .gap_1()
+                                    .w_full()
+                                    .min_w_0()
                                     .child(
                                         h_flex()
                                             .justify_between()
                                             .items_center()
+                                            .gap_2()
+                                            .w_full()
                                             .child(
                                                 h_flex()
+                                                    .flex_1()
+                                                    .min_w_0()
                                                     .gap_1p5()
                                                     .items_center()
                                                     .child(
                                                         div()
                                                             .font_weight(FontWeight::MEDIUM)
+                                                            .text_color(theme.foreground)
+                                                            .truncate()
                                                             .child(p.name().to_string()),
                                                     )
                                                     .when(is_startup, |this| {
                                                         this.child(
-                                                            Badge::new()
-                                                                .with_variant(TagVariant::Warning)
-                                                                .child(STARTUP_BADGE_LABEL),
+                                                            div().flex_shrink_0().child(
+                                                                Badge::new()
+                                                                    .with_variant(
+                                                                        TagVariant::Warning,
+                                                                    )
+                                                                    .child(STARTUP_BADGE_LABEL),
+                                                            ),
                                                         )
                                                     })
                                                     .when(has_unsaved, |this| {
@@ -299,6 +354,7 @@ impl WindowHopView {
                                                                     "dot-unsaved-{}",
                                                                     pid
                                                                 )))
+                                                                .flex_shrink_0()
                                                                 .text_xs()
                                                                 .text_color(theme.warning)
                                                                 .font_weight(FontWeight::BOLD)
@@ -307,24 +363,63 @@ impl WindowHopView {
                                                     }),
                                             )
                                             .child(
-                                                Badge::new()
-                                                    .with_variant(status_badge.variant)
-                                                    .child(status_badge.label),
+                                                div().flex_shrink_0().child(
+                                                    Badge::new()
+                                                        .with_variant(status_badge.variant)
+                                                        .child(status_badge.label),
+                                                ),
                                             ),
                                     )
                                     .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(shadcn.muted_foreground)
-                                            .child(p.browser_path().to_string_lossy().to_string()),
+                                        h_flex()
+                                            .gap_1p5()
+                                            .items_center()
+                                            .w_full()
+                                            .min_w_0()
+                                            .child(
+                                                Icon::new(IconName::Globe)
+                                                    .size_3()
+                                                    .text_color(theme.muted_foreground),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                                    .truncate()
+                                                    .child(
+                                                        p.browser_path()
+                                                            .to_string_lossy()
+                                                            .to_string(),
+                                                    ),
+                                            ),
                                     )
                                     .child(
-                                        div().text_xs().text_color(shadcn.muted_foreground).child(
-                                            match p.target_monitor() {
-                                                Some(m) => format!("Monitor: {}", m),
-                                                None => "Monitor: (Belum Dipilih)".to_string(),
-                                            },
-                                        ),
+                                        h_flex()
+                                            .gap_1p5()
+                                            .items_center()
+                                            .w_full()
+                                            .min_w_0()
+                                            .child(
+                                                Icon::new(IconName::SquareTerminal)
+                                                    .size_3()
+                                                    .text_color(theme.muted_foreground),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                                    .truncate()
+                                                    .child(match p.target_monitor() {
+                                                        Some(m) => format!("Monitor: {}", m),
+                                                        None => {
+                                                            "Monitor: (Belum Dipilih)".to_string()
+                                                        }
+                                                    }),
+                                            ),
                                     ),
                             )
                     }))
@@ -333,11 +428,13 @@ impl WindowHopView {
             // Bagian Pengaturan Mulai Otomatis (Startup Windows)
             .child(
                 v_flex()
+                    .flex_shrink_0()
+                    .w_full()
                     .p_3()
                     .rounded_md()
                     .border_1()
-                    .border_color(shadcn.border)
-                    .bg(shadcn.muted.opacity(0.3))
+                    .border_color(theme.border)
+                    .bg(theme.tokens.group_box)
                     .gap_2()
                     .child(
                         h_flex()
@@ -358,7 +455,7 @@ impl WindowHopView {
                                             .text_color(if self.cached_startup_enabled {
                                                 theme.primary
                                             } else {
-                                                shadcn.muted_foreground
+                                                theme.muted_foreground
                                             })
                                             .child(if self.cached_startup_enabled {
                                                 "Status: Aktif di Tray"
@@ -369,6 +466,8 @@ impl WindowHopView {
                             )
                             .child(
                                 Button::new("btn-toggle-startup")
+                                    .outline()
+                                    .small()
                                     .label(if self.cached_startup_enabled {
                                         "Nonaktifkan"
                                     } else {
@@ -380,7 +479,7 @@ impl WindowHopView {
                                     })),
                             ),
                     )
-                    .child(div().text_xs().text_color(shadcn.muted_foreground).child(
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(
                         match &self.cached_startup_profile_id {
                             Some(pid) => {
                                 let name = self

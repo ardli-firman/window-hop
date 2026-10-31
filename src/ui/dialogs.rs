@@ -1,7 +1,8 @@
 //! Status notification banners and delete confirmation dialogs for Window Hop UI.
 
+use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable as _};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable as _, Icon, IconName};
 use gpui_kit::*;
 
 use crate::application::StopOutcome;
@@ -70,38 +71,28 @@ impl WindowHopView {
     /// Renders the top notification / status banner if a message is present.
     pub(crate) fn render_status_banner(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
         let msg = self.status_message.as_ref()?;
-        let theme = cx.theme().clone();
-        let bg_color = if self.is_error {
-            theme.danger.opacity(0.15)
-        } else {
-            theme.primary.opacity(0.15)
-        };
-        let text_color = if self.is_error {
-            theme.danger
-        } else {
-            theme.primary
-        };
 
-        Some(
-            div()
-                .p_3()
-                .rounded_md()
-                .bg(bg_color)
-                .border_1()
-                .border_color(text_color)
-                .child(
-                    h_flex()
-                        .justify_between()
-                        .items_center()
-                        .child(div().text_sm().text_color(text_color).child(msg.clone()))
-                        .child(Button::new("btn-dismiss-status").label("Tutup").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.status_message = None;
-                                cx.notify();
-                            }),
-                        )),
-                ),
-        )
+        if self.is_error {
+            Some(
+                Alert::error("status-banner", msg.clone())
+                    .title("Peringatan")
+                    .on_close(cx.listener(|this, _, _, cx| {
+                        this.status_message = None;
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            )
+        } else {
+            Some(
+                Alert::info("status-banner", msg.clone())
+                    .title("Informasi")
+                    .on_close(cx.listener(|this, _, _, cx| {
+                        this.status_message = None;
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            )
+        }
     }
 
     /// Renders the confirmation modal dialog when deleting an active running profile.
@@ -147,22 +138,24 @@ impl WindowHopView {
                 .id("delete-confirmation-modal-backdrop")
                 .absolute()
                 .inset_0()
-                .bg(hsla(0.0, 0.0, 0.0, 0.65))
+                .bg(theme.background.opacity(0.8))
                 .flex()
                 .items_center()
                 .justify_center()
+                .p_4()
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.cancel_delete_profile(cx);
                 }))
                 .child(
                     div()
                         .id("delete-confirmation-dialog")
-                        .w(px(480.0))
+                        .w_full()
+                        .max_w(px(520.0))
                         .p_6()
                         .rounded_xl()
-                        .border_2()
-                        .border_color(theme.danger)
-                        .bg(theme.background)
+                        .border_1()
+                        .border_color(theme.danger.opacity(0.4))
+                        .bg(theme.tokens.group_box)
                         .shadow_lg()
                         .on_click(|_, _, _| {})
                         .child(
@@ -177,8 +170,7 @@ impl WindowHopView {
                                                 .p_2()
                                                 .rounded_full()
                                                 .bg(theme.danger.opacity(0.15))
-                                                .text_color(theme.danger)
-                                                .child("⚠"),
+                                                .child(Icon::new(IconName::TriangleAlert).size_5().text_color(theme.danger)),
                                         )
                                         .child(
                                             div()
@@ -191,6 +183,7 @@ impl WindowHopView {
                                 .child(
                                     div()
                                         .text_sm()
+                                        .line_height(relative(1.5))
                                         .text_color(theme.foreground)
                                         .child(model.description),
                                 )
@@ -207,6 +200,7 @@ impl WindowHopView {
                                         .mt_2()
                                         .child(
                                             Button::new("btn-cancel-delete")
+                                                .outline()
                                                 .label(model.cancel_button_label)
                                                 .disabled(is_busy)
                                                 .on_click(cx.listener(|this, _, _, cx| {

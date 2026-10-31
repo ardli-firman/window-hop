@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use gpui_kit::component::input::InputState;
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme, TitleBar};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Icon, IconName, TitleBar};
 use gpui_kit::*;
 
 use crate::application::LifecycleCoordinator;
@@ -547,6 +547,7 @@ impl Render for WindowHopView {
                     h_flex()
                         .items_center()
                         .gap_2()
+                        .child(Icon::new(IconName::SquareTerminal).size_4().text_color(theme.primary))
                         .child(
                             div()
                                 .text_sm()
@@ -558,12 +559,14 @@ impl Render for WindowHopView {
             .child(
                 v_flex()
                     .flex_1()
-                    .p_6()
-                    .gap_4()
+                    .min_h_0()
+                    .p_5()
+                    .gap_3()
                     .overflow_hidden()
                     // Header
                     .child(
                         v_flex()
+                            .flex_shrink_0()
                             .gap_1()
                             .child(
                                 h_flex()
@@ -595,7 +598,10 @@ impl Render for WindowHopView {
                     .child(
                         h_flex()
                             .flex_1()
-                            .gap_6()
+                            .min_h_0()
+                            .w_full()
+                            .gap_4()
+                            .overflow_hidden()
                             // Kolom Kiri: Master Sidebar
                             .child(self.render_sidebar(&shadcn, cx))
                             // Kolom Kanan: Detail Form Panel

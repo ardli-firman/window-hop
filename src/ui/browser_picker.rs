@@ -2,10 +2,13 @@
 
 use std::path::PathBuf;
 
+use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::tag::{Tag as Badge, TagVariant};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable as _};
+use gpui_kit::component::{
+    h_flex, v_flex, ActiveTheme, Disableable as _, Icon, IconName, Sizable as _,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -143,6 +146,9 @@ impl WindowHopView {
                                     )
                                     .child(
                                         Button::new("btn-refresh-browsers")
+                                            .outline()
+                                            .small()
+                                            .icon(IconName::RefreshCw)
                                             .label("Segarkan Browser")
                                             .disabled(is_busy)
                                             .on_click(cx.listener(|this, _, _, cx| {
@@ -153,15 +159,8 @@ impl WindowHopView {
                     )
                     .when_some(self.detected_browsers_error.as_ref(), |this, err| {
                         this.child(
-                            div()
-                                .p_2()
-                                .rounded_md()
-                                .bg(theme.danger.opacity(0.12))
-                                .border_1()
-                                .border_color(theme.danger)
-                                .text_xs()
-                                .text_color(theme.danger)
-                                .child(format!("Peringatan deteksi browser: {}", err)),
+                            Alert::warning("detected-browsers-error", format!("Peringatan deteksi browser: {}", err))
+                                .title("Peringatan Sistem"),
                         )
                     })
                     .child({
@@ -169,12 +168,21 @@ impl WindowHopView {
                             div()
                                 .p_3()
                                 .rounded_md()
-                                .bg(theme.muted.opacity(0.3))
+                                .bg(theme.tokens.group_box)
                                 .border_1()
                                 .border_color(theme.border)
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child("Tidak ada instalasi browser yang terdeteksi otomatis pada sistem. Silakan gunakan pemilihan file executable .exe manual di bawah.")
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(Icon::new(IconName::Info).size_4().text_color(theme.muted_foreground))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child("Tidak ada instalasi browser yang terdeteksi otomatis pada sistem. Silakan gunakan pemilihan file executable .exe manual di bawah."),
+                                        ),
+                                )
                         } else {
                             let current_path = self.path_input.read(cx).value().trim().to_string();
                             let detected_list = self.cached_detected_browsers.clone();
@@ -191,7 +199,7 @@ impl WindowHopView {
                                         let (bg, border) = if is_selected {
                                             (theme.primary.opacity(0.12), theme.primary)
                                         } else {
-                                            (theme.muted.opacity(0.2), theme.border)
+                                            (*theme.tokens.group_box, theme.border)
                                         };
 
                                         let item_id = SharedString::from(format!("detected-browser-item-{}", idx));
@@ -206,6 +214,7 @@ impl WindowHopView {
                                             .border_1()
                                             .border_color(border)
                                             .bg(bg)
+                                            .hover(|s| s.bg(theme.accent.opacity(0.18)))
                                             .cursor_pointer()
                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                 this.select_detected_browser(&b_clone, window, cx);
@@ -213,24 +222,35 @@ impl WindowHopView {
                                             .child(
                                                 v_flex()
                                                     .gap_1p5()
+                                                    .w_full()
+                                                    .min_w_0()
                                                     .child(
                                                         h_flex()
                                                             .justify_between()
                                                             .items_center()
+                                                            .gap_2()
+                                                            .w_full()
                                                             .child(
                                                                 h_flex()
+                                                                    .flex_1()
+                                                                    .min_w_0()
                                                                     .gap_2()
                                                                     .items_center()
-                                                                    .child(div().text_base().child(tile.brand_icon()))
+                                                                    .child(div().flex_shrink_0().text_base().child(tile.brand_icon()))
                                                                     .child(
                                                                         div()
+                                                                            .flex_1()
+                                                                            .min_w_0()
+                                                                            .truncate()
                                                                             .text_sm()
                                                                             .font_weight(FontWeight::SEMIBOLD)
+                                                                            .text_color(theme.foreground)
                                                                             .child(tile.name.clone()),
                                                                     ),
                                                             )
                                                             .child(if is_selected {
                                                                 div()
+                                                                    .flex_shrink_0()
                                                                     .text_xs()
                                                                     .font_weight(FontWeight::BOLD)
                                                                     .text_color(theme.primary)
@@ -243,16 +263,26 @@ impl WindowHopView {
                                                         h_flex()
                                                             .justify_between()
                                                             .items_center()
+                                                            .flex_wrap()
+                                                            .gap_1()
+                                                            .w_full()
                                                             .child(
                                                                 div()
+                                                                    .flex_1()
+                                                                    .min_w_0()
+                                                                    .truncate()
                                                                     .text_xs()
                                                                     .text_color(theme.muted_foreground)
                                                                     .child(tile.subtitle()),
                                                             )
                                                             .child(
-                                                                Badge::new()
-                                                                    .with_variant(status_variant)
-                                                                    .child(status_label),
+                                                                div()
+                                                                    .flex_shrink_0()
+                                                                    .child(
+                                                                        Badge::new()
+                                                                            .with_variant(status_variant)
+                                                                            .child(status_label),
+                                                                    ),
                                                             ),
                                                     ),
                                             )
@@ -264,12 +294,15 @@ impl WindowHopView {
             // Field Executable Browser + Tombol Browse Manual
             .child(
                 v_flex()
+                    .w_full()
                     .gap_1()
                     .child(
                         h_flex()
                             .justify_between()
                             .items_center()
-                            .child(div().text_sm().child("Jalur Executable Browser (Manual / Portable):"))
+                            .flex_wrap()
+                            .gap_1()
+                            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Jalur Executable Browser (Manual / Portable):"))
                             .child(
                                 div()
                                     .text_xs()
@@ -280,13 +313,19 @@ impl WindowHopView {
                     .child(
                         h_flex()
                             .gap_2()
+                            .items_center()
+                            .w_full()
                             .child(
                                 div()
                                     .flex_1()
+                                    .min_w_0()
                                     .child(Input::new(&self.path_input)),
                             )
                             .child(
                                 Button::new("btn-browse-browser")
+                                    .flex_shrink_0()
+                                    .outline()
+                                    .icon(IconName::FolderOpen)
                                     .label("Pilih File .exe...")
                                     .disabled(is_busy)
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -338,14 +377,22 @@ impl WindowHopView {
                             .child(
                                 v_flex()
                                     .gap_1()
+                                    .w_full()
+                                    .min_w_0()
                                     .child(
                                         h_flex()
                                             .justify_between()
                                             .items_center()
+                                            .flex_wrap()
+                                            .gap_2()
+                                            .w_full()
                                             .child(
                                                 h_flex()
+                                                    .flex_1()
+                                                    .min_w_0()
                                                     .gap_2()
                                                     .items_center()
+                                                    .flex_wrap()
                                                     .child(
                                                         div()
                                                             .font_weight(FontWeight::SEMIBOLD)
@@ -362,6 +409,7 @@ impl WindowHopView {
                                             )
                                             .child(
                                                 div()
+                                                    .flex_shrink_0()
                                                     .id("badge-compat-safe")
                                                     .cursor_pointer()
                                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -381,12 +429,16 @@ impl WindowHopView {
                                     .child(
                                         div()
                                             .text_xs()
+                                            .w_full()
+                                            .min_w_0()
                                             .child(format!("Bukti: {}", evidence.evidence_text)),
                                     )
                                     .when(!limit_text.is_empty(), |this| {
                                         this.child(
                                             div()
                                                 .text_xs()
+                                                .w_full()
+                                                .min_w_0()
                                                 .text_color(theme.muted_foreground)
                                                 .child(format!("Batasan: {}", limit_text)),
                                         )
@@ -408,14 +460,22 @@ impl WindowHopView {
                             .child(
                                 v_flex()
                                     .gap_1()
+                                    .w_full()
+                                    .min_w_0()
                                     .child(
                                         h_flex()
                                             .justify_between()
                                             .items_center()
+                                            .flex_wrap()
+                                            .gap_2()
+                                            .w_full()
                                             .child(
                                                 h_flex()
+                                                    .flex_1()
+                                                    .min_w_0()
                                                     .gap_2()
                                                     .items_center()
+                                                    .flex_wrap()
                                                     .child(
                                                         div()
                                                             .font_weight(FontWeight::SEMIBOLD)
@@ -432,6 +492,7 @@ impl WindowHopView {
                                             )
                                             .child(
                                                 div()
+                                                    .flex_shrink_0()
                                                     .id("badge-compat-unverified")
                                                     .cursor_pointer()
                                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -451,11 +512,15 @@ impl WindowHopView {
                                     .child(
                                         div()
                                             .text_xs()
+                                            .w_full()
+                                            .min_w_0()
                                             .child(format!("Bukti: {}", evidence.evidence_text)),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
+                                            .w_full()
+                                            .min_w_0()
                                             .text_color(theme.muted_foreground)
                                             .child("ℹ Profil dengan browser ini tetap dapat disimpan untuk persiapan konfigurasi, namun gate aktivasi diblokir demi keamanan data perawat."),
                                     ),
@@ -471,31 +536,46 @@ impl WindowHopView {
                             .child(
                                 v_flex()
                                     .gap_1()
+                                    .w_full()
+                                    .min_w_0()
                                     .child(
                                         h_flex()
                                             .justify_between()
                                             .items_center()
+                                            .flex_wrap()
+                                            .gap_2()
+                                            .w_full()
                                             .child(
                                                 div()
+                                                    .flex_1()
+                                                    .min_w_0()
                                                     .font_weight(FontWeight::SEMIBOLD)
                                                     .text_xs()
                                                     .text_color(theme.danger)
                                                     .child("Status Dukungan: Executable Tidak Tersedia"),
                                             )
                                             .child(
-                                                Badge::new()
-                                                    .with_variant(compat_badge.variant)
-                                                    .child(compat_badge.label.clone()),
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .child(
+                                                        Badge::new()
+                                                            .with_variant(compat_badge.variant)
+                                                            .child(compat_badge.label.clone()),
+                                                    ),
                                             ),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
+                                            .w_full()
+                                            .min_w_0()
                                             .child(format!("Kesalahan: {}", reason)),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
+                                            .w_full()
+                                            .min_w_0()
                                             .text_color(theme.muted_foreground)
                                             .child(format!("Jalur: {}", path.display())),
                                     ),
