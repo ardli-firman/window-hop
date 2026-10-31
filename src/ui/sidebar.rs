@@ -4,7 +4,9 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::empty::{Empty, EmptyDescription, EmptyHeader, EmptyTitle};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::tag::{Tag as Badge, TagVariant};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable as _, Icon, IconName, Sizable as _};
+use gpui_kit::component::{
+    h_flex, v_flex, ActiveTheme, Disableable as _, Icon, IconName, Sizable as _,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -194,7 +196,11 @@ impl WindowHopView {
                         h_flex()
                             .gap_2()
                             .items_center()
-                            .child(Icon::new(IconName::LayoutDashboard).size_4().text_color(theme.muted_foreground))
+                            .child(
+                                Icon::new(IconName::LayoutDashboard)
+                                    .size_4()
+                                    .text_color(theme.muted_foreground),
+                            )
                             .child(
                                 div()
                                     .font_weight(FontWeight::SEMIBOLD)
@@ -216,9 +222,11 @@ impl WindowHopView {
             .when(show_search, |this| {
                 this.child(
                     div().child(
-                        Input::new(&self.search_input)
-                            .cleanable(true)
-                            .prefix(Icon::new(IconName::Search).size_3p5().text_color(theme.muted_foreground)),
+                        Input::new(&self.search_input).cleanable(true).prefix(
+                            Icon::new(IconName::Search)
+                                .size_3p5()
+                                .text_color(theme.muted_foreground),
+                        ),
                     ),
                 )
             })
@@ -231,7 +239,9 @@ impl WindowHopView {
                             .header(
                                 EmptyHeader::new()
                                     .title(EmptyTitle::new().child(EMPTY_STATE_TITLE))
-                                    .description(EmptyDescription::new().child(EMPTY_STATE_DESCRIPTION)),
+                                    .description(
+                                        EmptyDescription::new().child(EMPTY_STATE_DESCRIPTION),
+                                    ),
                             )
                             .child(
                                 Button::new("btn-empty-new-profile")
@@ -328,13 +338,13 @@ impl WindowHopView {
                                                     )
                                                     .when(is_startup, |this| {
                                                         this.child(
-                                                            div()
-                                                                .flex_shrink_0()
-                                                                .child(
-                                                                    Badge::new()
-                                                                        .with_variant(TagVariant::Warning)
-                                                                        .child(STARTUP_BADGE_LABEL),
-                                                                ),
+                                                            div().flex_shrink_0().child(
+                                                                Badge::new()
+                                                                    .with_variant(
+                                                                        TagVariant::Warning,
+                                                                    )
+                                                                    .child(STARTUP_BADGE_LABEL),
+                                                            ),
                                                         )
                                                     })
                                                     .when(has_unsaved, |this| {
@@ -353,12 +363,35 @@ impl WindowHopView {
                                                     }),
                                             )
                                             .child(
+                                                div().flex_shrink_0().child(
+                                                    Badge::new()
+                                                        .with_variant(status_badge.variant)
+                                                        .child(status_badge.label),
+                                                ),
+                                            ),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .gap_1p5()
+                                            .items_center()
+                                            .w_full()
+                                            .min_w_0()
+                                            .child(
+                                                Icon::new(IconName::Globe)
+                                                    .size_3()
+                                                    .text_color(theme.muted_foreground),
+                                            )
+                                            .child(
                                                 div()
-                                                    .flex_shrink_0()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                                    .truncate()
                                                     .child(
-                                                        Badge::new()
-                                                            .with_variant(status_badge.variant)
-                                                            .child(status_badge.label),
+                                                        p.browser_path()
+                                                            .to_string_lossy()
+                                                            .to_string(),
                                                     ),
                                             ),
                                     )
@@ -368,7 +401,11 @@ impl WindowHopView {
                                             .items_center()
                                             .w_full()
                                             .min_w_0()
-                                            .child(Icon::new(IconName::Globe).size_3().text_color(theme.muted_foreground))
+                                            .child(
+                                                Icon::new(IconName::SquareTerminal)
+                                                    .size_3()
+                                                    .text_color(theme.muted_foreground),
+                                            )
                                             .child(
                                                 div()
                                                     .flex_1()
@@ -376,29 +413,12 @@ impl WindowHopView {
                                                     .text_xs()
                                                     .text_color(theme.muted_foreground)
                                                     .truncate()
-                                                    .child(p.browser_path().to_string_lossy().to_string()),
-                                            ),
-                                    )
-                                    .child(
-                                        h_flex()
-                                            .gap_1p5()
-                                            .items_center()
-                                            .w_full()
-                                            .min_w_0()
-                                            .child(Icon::new(IconName::SquareTerminal).size_3().text_color(theme.muted_foreground))
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .text_xs()
-                                                    .text_color(theme.muted_foreground)
-                                                    .truncate()
-                                                    .child(
-                                                        match p.target_monitor() {
-                                                            Some(m) => format!("Monitor: {}", m),
-                                                            None => "Monitor: (Belum Dipilih)".to_string(),
-                                                        },
-                                                    ),
+                                                    .child(match p.target_monitor() {
+                                                        Some(m) => format!("Monitor: {}", m),
+                                                        None => {
+                                                            "Monitor: (Belum Dipilih)".to_string()
+                                                        }
+                                                    }),
                                             ),
                                     ),
                             )

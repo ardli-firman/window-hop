@@ -6,7 +6,9 @@ use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::tag::{Tag as Badge, TagVariant};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable as _, Icon, IconName, Sizable as _};
+use gpui_kit::component::{
+    h_flex, v_flex, ActiveTheme, Disableable as _, Icon, IconName, Sizable as _,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
