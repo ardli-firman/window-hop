@@ -21,9 +21,10 @@ use window_hop::ui::tokens::{
     WINDOW_MIN_WIDTH,
 };
 use window_hop::ui::{
-    find_occupying_profile, BrowserCompatibilityBadge, BrowserQuickTileModel, MonitorCardModel,
-    WindowHopView, DISCONNECTED_BADGE, DISCONNECTED_WARNING, MONITOR_POLL_INTERVAL,
-    NURSE_PRIMARY_BADGE, NURSE_PRIMARY_WARNING, RECOMMENDED_QUEUE_BADGE,
+    find_occupying_profile, ActionBarModel, ActionKind, BrowserCompatibilityBadge,
+    BrowserQuickTileModel, DeleteConfirmationModalModel, MonitorCardModel, ShortcutOptionsModel,
+    StartupCardModel, WindowHopView, DISCONNECTED_BADGE, DISCONNECTED_WARNING,
+    MONITOR_POLL_INTERVAL, NURSE_PRIMARY_BADGE, NURSE_PRIMARY_WARNING, RECOMMENDED_QUEUE_BADGE,
 };
 
 #[test]
@@ -779,4 +780,232 @@ fn test_form_kiosk_and_url_unsaved_changes_detection() {
         target_monitor: Some(&None),
     };
     assert!(profile_has_unsaved_changes(&p, Some(&draft_added_advanced)));
+}
+
+#[test]
+fn test_sticky_action_bar_dynamic_lifecycle_transitions() {
+    let dummy_monitor = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-TARGET"),
+        name: "LG Monitor Antrian".to_string(),
+        is_primary: false,
+    };
+
+    // 1. New Profile (No profile selected): Primary action is "Simpan Profil"
+    let model_new = ActionBarModel::evaluate(None, false, false, false);
+    assert_eq!(model_new.primary_action.kind, ActionKind::Save);
+    assert_eq!(model_new.primary_action.label, "Simpan Profil");
+    assert!(model_new.primary_action.is_primary);
+    assert!(!model_new.primary_action.is_disabled);
+    assert!(model_new
+        .secondary_actions
+        .iter()
+        .any(|a| a.kind == ActionKind::Reset));
+
+    // 2. Idle Profile: Primary action is "Aktifkan Profil" (or "Jalankan Profil")
+    let idle_state = ProfileLifecycleState::Idle;
+    let model_idle = ActionBarModel::evaluate(Some(&idle_state), false, true, false);
+    assert_eq!(model_idle.primary_action.kind, ActionKind::Activate);
+    assert_eq!(model_idle.primary_action.label, "Aktifkan Profil");
+    assert!(model_idle.primary_action.is_primary);
+    assert!(!model_idle.primary_action.is_disabled);
+    assert!(model_idle
+        .secondary_actions
+        .iter()
+        .any(|a| a.kind == ActionKind::Save));
+    assert!(model_idle
+        .secondary_actions
+        .iter()
+        .any(|a| a.kind == ActionKind::CreateDesktopShortcut));
+    assert!(model_idle
+        .secondary_actions
+        .iter()
+        .any(|a| a.kind == ActionKind::Delete));
+
+    // 3. Running Profile without changes: Primary action is "Buka Window Profil"
+    let running_state = ProfileLifecycleState::Running {
+        pid: ProcessId::new(4567),
+        target_monitor: dummy_monitor.clone(),
+    };
+    let model_running = ActionBarModel::evaluate(Some(&running_state), false, true, false);
+    assert_eq!(model_running.primary_action.kind, ActionKind::OpenWindow);
+    assert_eq!(model_running.primary_action.label, "Buka Window Profil");
+    assert!(model_running.primary_action.is_primary);
+    let stop_action = model_running
+        .secondary_actions
+        .iter()
+        .find(|a| a.kind == ActionKind::Stop)
+        .expect("running profile must have Stop action");
+    assert_eq!(stop_action.label, "Hentikan Profil");
+    assert!(stop_action.is_danger);
+
+    // 4. Running Profile with saved changes: Primary action becomes "Terapkan & Muat Ulang"
+    let model_running_changes = ActionBarModel::evaluate(Some(&running_state), true, true, false);
+    assert_eq!(
+        model_running_changes.primary_action.kind,
+        ActionKind::ApplyRestart
+    );
+    assert_eq!(
+        model_running_changes.primary_action.label,
+        "Terapkan & Muat Ulang"
+    );
+    assert!(model_running_changes.primary_action.is_primary);
+    assert!(model_running_changes
+        .secondary_actions
+        .iter()
+        .any(|a| a.kind == ActionKind::Stop));
+
+    // 5. Disconnected Profile (cable unplugged): Primary action is "Coba Hubungkan Kembali"
+    let disconnected_state = ProfileLifecycleState::Disconnected {
+        target_monitor: MonitorIdentity::new("MON-TARGET"),
+    };
+    let model_disconnected =
+        ActionBarModel::evaluate(Some(&disconnected_state), false, true, false);
+    assert_eq!(
+        model_disconnected.primary_action.kind,
+        ActionKind::Reconnect
+    );
+    assert_eq!(
+        model_disconnected.primary_action.label,
+        "Coba Hubungkan Kembali"
+    );
+    assert!(model_disconnected.primary_action.is_primary);
+
+    // 6. Busy state disables actions and provides loading labels
+    let model_busy = ActionBarModel::evaluate(Some(&running_state), true, true, true);
+    assert!(model_busy.primary_action.is_disabled);
+    assert_eq!(model_busy.primary_action.label, "Memproses...");
+    let busy_stop = model_busy
+        .secondary_actions
+        .iter()
+        .find(|a| a.kind == ActionKind::Stop)
+        .unwrap();
+    assert!(busy_stop.is_disabled);
+    assert_eq!(busy_stop.label, "Menghentikan...");
+}
+
+#[test]
+fn test_shortcut_options_model_and_desktop_default() {
+    // 1. None custom path defaults to Desktop
+    let default_options = ShortcutOptionsModel::new(None);
+    assert!(default_options.is_desktop_default);
+    assert_eq!(default_options.destination_display(), "Desktop (Default)");
+
+    // 2. Empty string path defaults to Desktop
+    let empty_options = ShortcutOptionsModel::new(Some(PathBuf::from("")));
+    assert!(empty_options.is_desktop_default);
+    assert_eq!(empty_options.destination_display(), "Desktop (Default)");
+
+    // 3. Custom path specifies explicit destination
+    let custom_options = ShortcutOptionsModel::new(Some(PathBuf::from(r"C:\Custom\Shortcuts")));
+    assert!(!custom_options.is_desktop_default);
+    assert_eq!(
+        custom_options.current_folder,
+        Some(PathBuf::from(r"C:\Custom\Shortcuts"))
+    );
+    assert_eq!(custom_options.destination_display(), r"C:\Custom\Shortcuts");
+}
+
+#[test]
+fn test_startup_card_model_and_reassignment_notice() {
+    let pid_a = ProfileId::new("p-a");
+    let pid_b = ProfileId::new("p-b");
+
+    let profiles = vec![
+        Profile::new_draft(pid_a.clone(), "Poli Anak", PathBuf::from("chrome.exe"), ""),
+        Profile::new_draft(pid_b.clone(), "Poli Gigi", PathBuf::from("chrome.exe"), ""),
+    ];
+
+    // 1. Profile A is currently the startup profile
+    let model_a = StartupCardModel::evaluate(&pid_a, Some(&pid_a), &profiles);
+    assert!(model_a.is_startup_profile);
+    assert_eq!(model_a.switch_label, "Jalankan otomatis saat Windows login");
+    assert!(model_a.description.contains("Profil ini dipilih"));
+    assert_eq!(model_a.reassignment_notice, None);
+
+    // 2. Profile B is being viewed, but Profile A is the active startup profile
+    let model_b = StartupCardModel::evaluate(&pid_b, Some(&pid_a), &profiles);
+    assert!(!model_b.is_startup_profile);
+    assert_eq!(model_b.switch_label, "Jalankan otomatis saat Windows login");
+    assert_eq!(model_b.description, "Bukan profil startup saat ini");
+    let notice = model_b
+        .reassignment_notice
+        .expect("should have reassignment notice");
+    assert!(notice.contains("Poli Anak"));
+    assert!(notice.contains("memindahkan profil startup"));
+
+    // 3. No profile is configured as startup profile
+    let model_none = StartupCardModel::evaluate(&pid_b, None, &profiles);
+    assert!(!model_none.is_startup_profile);
+    assert_eq!(model_none.reassignment_notice, None);
+
+    // 4. Transfer message formatting
+    let transfer_msg = StartupCardModel::format_transfer_message("Poli Anak", "Poli Gigi");
+    assert_eq!(
+        transfer_msg,
+        "Profil startup berhasil dipindahkan dari 'Poli Anak' ke 'Poli Gigi'."
+    );
+
+    // 5. Unset message formatting
+    let unset_msg = StartupCardModel::format_unset_message("Poli Gigi");
+    assert_eq!(
+        unset_msg,
+        "Profil 'Poli Gigi' tidak lagi dijalankan otomatis saat login."
+    );
+}
+
+#[test]
+fn test_delete_active_profile_shows_alert_dialog_modal_and_direct_stop_execution() {
+    let dummy_monitor = MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-TARGET"),
+        name: "Monitor Antrian 1".to_string(),
+        is_primary: false,
+    };
+
+    let mut p = Profile::new_draft(
+        ProfileId::new("p-active"),
+        "Antrian Poli Utama",
+        PathBuf::from(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+        "--kiosk",
+    );
+    p.set_target_monitor(Some(MonitorIdentity::new("MON-TARGET")));
+
+    let running_state = ProfileLifecycleState::Running {
+        pid: ProcessId::new(9999),
+        target_monitor: dummy_monitor.clone(),
+    };
+    let idle_state = ProfileLifecycleState::Idle;
+
+    // 1. Idle profile deletion does NOT prompt modal confirmation (deletes immediately)
+    assert!(!DeleteConfirmationModalModel::should_prompt_confirmation(
+        false
+    ));
+
+    // 2. Active running profile deletion prompts modal confirmation
+    assert!(DeleteConfirmationModalModel::should_prompt_confirmation(
+        true
+    ));
+
+    let modal = DeleteConfirmationModalModel::from_profile(&p, &running_state, false)
+        .expect("should generate confirmation modal model for running profile");
+
+    assert_eq!(modal.profile_id, p.id().clone());
+    assert_eq!(modal.title, "Konfirmasi Penghapusan Profil Aktif");
+    assert!(modal.description.contains("Antrian Poli Utama"));
+    assert!(modal.description.contains("Monitor Antrian 1"));
+    assert!(modal.description.contains("batas tenggat 3 detik"));
+    assert_eq!(
+        modal.confirm_button_label,
+        "Ya, Hapus Profil & Tutup Jendela"
+    );
+    assert_eq!(modal.cancel_button_label, "Batal");
+    assert!(modal.is_destructive);
+    assert!(modal.has_dim_backdrop);
+
+    // 3. Busy state updates confirm button label
+    let busy_modal = DeleteConfirmationModalModel::from_profile(&p, &running_state, true)
+        .expect("should generate confirmation modal model for running profile");
+    assert_eq!(busy_modal.confirm_button_label, "Menghapus...");
+
+    // 4. If called on Idle state, returns None
+    assert!(DeleteConfirmationModalModel::from_profile(&p, &idle_state, false).is_none());
 }

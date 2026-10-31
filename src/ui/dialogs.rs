@@ -5,8 +5,66 @@ use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable as _};
 use gpui_kit::*;
 
 use crate::application::StopOutcome;
-use crate::domain::{ProfileId, ProfileLifecycleState};
+use crate::domain::{Profile, ProfileId, ProfileLifecycleState};
 use crate::ui::WindowHopView;
+
+/// Model representasi modal konfirmasi AlertDialog saat menghapus profil aktif.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteConfirmationModalModel {
+    pub profile_id: ProfileId,
+    pub profile_name: String,
+    pub target_monitor_name: String,
+    pub title: &'static str,
+    pub description: String,
+    pub confirm_button_label: String,
+    pub cancel_button_label: &'static str,
+    pub is_destructive: bool,
+    pub has_dim_backdrop: bool,
+}
+
+impl DeleteConfirmationModalModel {
+    /// Menentukan apakah penghapusan profil memerlukan prompt konfirmasi modal.
+    /// Hanya profil yang sedang aktif berjalan yang memerlukan konfirmasi sebelum browser ditutup.
+    pub fn should_prompt_confirmation(is_running: bool) -> bool {
+        is_running
+    }
+
+    /// Mengevaluasi model dialog konfirmasi untuk profil dan status tertentu.
+    pub fn from_profile(
+        profile: &Profile,
+        lifecycle_state: &ProfileLifecycleState,
+        is_busy: bool,
+    ) -> Option<Self> {
+        let target_monitor_name = match lifecycle_state {
+            ProfileLifecycleState::Running { target_monitor, .. } => target_monitor.name.clone(),
+            _ => return None,
+        };
+
+        let description = format!(
+            "Profil '{}' sedang aktif berjalan di monitor '{}'. Menghapus profil ini akan menutup jendela browser yang sedang tayang (dengan batas tenggat 3 detik) dan menghapus konfigurasinya secara permanen.",
+            profile.name(),
+            target_monitor_name
+        );
+
+        let confirm_button_label = if is_busy {
+            "Menghapus...".to_string()
+        } else {
+            "Ya, Hapus Profil & Tutup Jendela".to_string()
+        };
+
+        Some(Self {
+            profile_id: profile.id().clone(),
+            profile_name: profile.name().to_string(),
+            target_monitor_name,
+            title: "Konfirmasi Penghapusan Profil Aktif",
+            description,
+            confirm_button_label,
+            cancel_button_label: "Batal",
+            is_destructive: true,
+            has_dim_backdrop: true,
+        })
+    }
+}
 
 impl WindowHopView {
     /// Renders the top notification / status banner if a message is present.
@@ -46,7 +104,7 @@ impl WindowHopView {
         )
     }
 
-    /// Renders the confirmation dialog banner when deleting an active running profile.
+    /// Renders the confirmation modal dialog when deleting an active running profile.
     pub(crate) fn render_delete_confirmation_dialog(
         &self,
         cx: &Context<Self>,
@@ -55,78 +113,115 @@ impl WindowHopView {
         let theme = cx.theme().clone();
         let is_busy = self.is_busy;
 
-        let p_name = self
-            .cached_profiles
-            .iter()
-            .find(|p| p.id() == &confirm_pid)
-            .map(|p| p.name().to_string())
-            .unwrap_or_else(|| confirm_pid.to_string());
-        let p_mon = self
+        let profile = self.find_cached_profile(&confirm_pid)?;
+        let lifecycle_state = self
             .cached_lifecycle_states
             .get(&confirm_pid)
-            .and_then(|st| match st {
-                ProfileLifecycleState::Running { target_monitor, .. } => {
-                    Some(format!("monitor '{}'", target_monitor.name))
-                }
-                _ => None,
-            })
-            .unwrap_or_else(|| "monitor tujuan".to_string());
+            .cloned()
+            .unwrap_or(ProfileLifecycleState::Idle);
+
+        let model = match DeleteConfirmationModalModel::from_profile(profile, &lifecycle_state, is_busy) {
+            Some(m) => m,
+            None => DeleteConfirmationModalModel {
+                profile_id: profile.id().clone(),
+                profile_name: profile.name().to_string(),
+                target_monitor_name: "-".to_string(),
+                title: "Konfirmasi Hapus Profil Aktif",
+                description: format!(
+                    "Apakah Anda yakin ingin menghapus profil antrian '{}'? Tindakan ini tidak dapat dibatalkan.",
+                    profile.name()
+                ),
+                confirm_button_label: if is_busy {
+                    "Menghapus...".to_string()
+                } else {
+                    "Ya, Hapus Profil".to_string()
+                },
+                cancel_button_label: "Batal",
+                is_destructive: true,
+                has_dim_backdrop: true,
+            },
+        };
 
         Some(
             div()
-                .id("delete-confirmation-banner")
-                .p_4()
-                .rounded_lg()
-                .border_2()
-                .border_color(theme.danger)
-                .bg(theme.danger.opacity(0.12))
+                .id("delete-confirmation-modal-backdrop")
+                .absolute()
+                .inset_0()
+                .bg(hsla(0.0, 0.0, 0.0, 0.65))
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.cancel_delete_profile(cx);
+                }))
                 .child(
-                    v_flex()
-                        .gap_2()
+                    div()
+                        .id("delete-confirmation-dialog")
+                        .w(px(480.0))
+                        .p_6()
+                        .rounded_xl()
+                        .border_2()
+                        .border_color(theme.danger)
+                        .bg(theme.background)
+                        .shadow_lg()
+                        .on_click(|_, _, _| {})
                         .child(
-                            div()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(theme.danger)
-                                .child("⚠ Konfirmasi Penghapusan Profil Aktif"),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .child(format!(
-                                    "Profil '{}' sedang aktif berjalan di {}. Menghapus profil ini akan menutup jendela browser yang sedang tayang (dengan batas tenggat 3 detik) dan menghapus konfigurasinya secara permanen.",
-                                    p_name, p_mon
-                                )),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child("Apakah Anda yakin ingin menghapus profil ini? Tindakan ini tidak dapat dibatalkan."),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_3()
-                                .mt_1()
+                            v_flex()
+                                .gap_4()
                                 .child(
-                                    Button::new("btn-confirm-delete")
-                                        .danger()
-                                        .label(if is_busy {
-                                            "Menghapus..."
-                                        } else {
-                                            "Ya, Hapus Profil & Tutup Jendela"
-                                        })
-                                        .disabled(is_busy)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.execute_delete_profile(confirm_pid.clone(), cx);
-                                        })),
+                                    h_flex()
+                                        .gap_3()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .p_2()
+                                                .rounded_full()
+                                                .bg(theme.danger.opacity(0.15))
+                                                .text_color(theme.danger)
+                                                .child("⚠"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_lg()
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(theme.danger)
+                                                .child(model.title),
+                                        ),
                                 )
                                 .child(
-                                    Button::new("btn-cancel-delete")
-                                        .label("Batal")
-                                        .disabled(is_busy)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.cancel_delete_profile(cx);
-                                        })),
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme.foreground)
+                                        .child(model.description),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child("Apakah Anda yakin ingin menghapus profil ini? Tindakan ini tidak dapat dibatalkan."),
+                                )
+                                .child(
+                                    h_flex()
+                                        .justify_end()
+                                        .gap_3()
+                                        .mt_2()
+                                        .child(
+                                            Button::new("btn-cancel-delete")
+                                                .label(model.cancel_button_label)
+                                                .disabled(is_busy)
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.cancel_delete_profile(cx);
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("btn-confirm-delete")
+                                                .danger()
+                                                .label(model.confirm_button_label)
+                                                .disabled(is_busy)
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.execute_delete_profile(confirm_pid.clone(), cx);
+                                                })),
+                                        ),
                                 ),
                         ),
                 ),
@@ -144,7 +239,13 @@ impl WindowHopView {
         };
 
         let is_running = self.cached_running_ids.contains(pid);
-        if is_running {
+        let is_running_state = self
+            .cached_lifecycle_states
+            .get(pid)
+            .map(|s| DeleteConfirmationModalModel::should_prompt_confirmation(s.is_running()))
+            .unwrap_or(false);
+
+        if is_running || is_running_state {
             // Minta konfirmasi sebelum menghapus profil aktif
             self.confirming_delete_profile = Some(pid.clone());
             self.status_message = None;
