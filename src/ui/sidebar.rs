@@ -434,6 +434,7 @@ impl WindowHopView {
     /// Mengatur atau membatalkan profil yang dipilih sebagai profil startup.
     pub fn set_startup_profile(&mut self, profile_id: Option<ProfileId>, cx: &mut Context<Self>) {
         let coordinator_arc = self.coordinator.clone();
+        let prev_startup_id = self.cached_startup_profile_id.clone();
 
         match coordinator_arc
             .lock()
@@ -447,17 +448,42 @@ impl WindowHopView {
                 self.status_message = Some(match profile_id {
                     Some(ref pid) => {
                         let name = self
-                            .cached_profiles
-                            .iter()
-                            .find(|p| p.id() == pid)
+                            .find_cached_profile(pid)
                             .map(|p| p.name())
                             .unwrap_or("Profil");
-                        format!(
-                            "Profil '{}' dipilih sebagai profil startup setelah login.",
-                            name
-                        )
+                        if let Some(ref prev_id) = prev_startup_id {
+                            if prev_id != pid {
+                                let prev_name = self
+                                    .find_cached_profile(prev_id)
+                                    .map(|p| p.name())
+                                    .unwrap_or("Sebelumnya");
+                                crate::ui::form::StartupCardModel::format_transfer_message(
+                                    prev_name, name,
+                                )
+                            } else {
+                                format!(
+                                    "Profil '{}' dipilih sebagai profil startup setelah login.",
+                                    name
+                                )
+                            }
+                        } else {
+                            format!(
+                                "Profil '{}' dipilih sebagai profil startup setelah login.",
+                                name
+                            )
+                        }
                     }
-                    None => "Pilihan profil startup dibatalkan.".to_string(),
+                    None => {
+                        if let Some(ref prev_id) = prev_startup_id {
+                            let prev_name = self
+                                .find_cached_profile(prev_id)
+                                .map(|p| p.name())
+                                .unwrap_or("Profil");
+                            crate::ui::form::StartupCardModel::format_unset_message(prev_name)
+                        } else {
+                            "Pilihan profil startup dibatalkan.".to_string()
+                        }
+                    }
                 });
                 self.is_error = false;
             }

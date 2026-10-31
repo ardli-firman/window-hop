@@ -32,7 +32,10 @@ pub(crate) mod monitor_card;
 pub mod sidebar;
 pub mod tokens;
 
+pub use action_bar::{ActionBarAction, ActionBarModel, ActionKind, ShortcutOptionsModel};
 pub use browser_picker::{BrowserCompatibilityBadge, BrowserQuickTileModel};
+pub use dialogs::DeleteConfirmationModalModel;
+pub use form::StartupCardModel;
 pub use monitor_card::{
     find_occupying_profile, MonitorCardModel, DISCONNECTED_BADGE, DISCONNECTED_WARNING,
     MONITOR_POLL_INTERVAL, NURSE_PRIMARY_BADGE, NURSE_PRIMARY_WARNING, RECOMMENDED_QUEUE_BADGE,
@@ -70,6 +73,7 @@ pub struct WindowHopView {
     pub(crate) status_message: Option<String>,
     pub(crate) is_error: bool,
     pub(crate) confirming_delete_profile: Option<ProfileId>,
+    pub(crate) is_shortcut_popover_open: bool,
 }
 
 impl WindowHopView {
@@ -272,6 +276,7 @@ impl WindowHopView {
             status_message: initial_error,
             is_error,
             confirming_delete_profile: None,
+            is_shortcut_popover_open: false,
         }
     }
 
@@ -313,6 +318,11 @@ impl WindowHopView {
                 self.is_error = true;
             }
         }
+    }
+
+    /// Mencari profil yang ter-cache berdasarkan ID.
+    pub(crate) fn find_cached_profile(&self, pid: &ProfileId) -> Option<&Profile> {
+        self.cached_profiles.iter().find(|p| p.id() == pid)
     }
 
     /// Memilih profil untuk diedit atau beralih ke form profil baru.
@@ -529,6 +539,7 @@ impl Render for WindowHopView {
 
         v_flex()
             .size_full()
+            .relative()
             .bg(shadcn.background)
             .text_color(shadcn.foreground)
             .child(
@@ -591,5 +602,7 @@ impl Render for WindowHopView {
                             .child(self.render_form(&shadcn, cx))
                     ),
             )
+            // Modal AlertDialog Konfirmasi Penghapusan (Top-level Overlay dengan Backdrop Dim/Blur)
+            .children(self.render_delete_confirmation_dialog(cx))
     }
 }

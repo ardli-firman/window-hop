@@ -9,8 +9,78 @@ use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use crate::domain::{Profile, ProfileId};
 use crate::ui::tokens::ShadcnTokens;
 use crate::ui::WindowHopView;
+
+/// Model representasi kartu pengaturan profil startup Windows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupCardModel {
+    pub is_startup_profile: bool,
+    pub previous_startup_profile_name: Option<String>,
+    pub switch_label: &'static str,
+    pub description: String,
+    pub reassignment_notice: Option<String>,
+}
+
+impl StartupCardModel {
+    /// Mengevaluasi status kartu startup untuk profil yang sedang ditampilkan.
+    pub fn evaluate(
+        profile_id: &ProfileId,
+        current_startup_id: Option<&ProfileId>,
+        profiles: &[Profile],
+    ) -> Self {
+        let is_startup_profile = current_startup_id == Some(profile_id);
+
+        let previous_startup_profile_name = if !is_startup_profile {
+            current_startup_id.and_then(|sid| {
+                profiles
+                    .iter()
+                    .find(|p| p.id() == sid)
+                    .map(|p| p.name().to_string())
+            })
+        } else {
+            None
+        };
+
+        let description = if is_startup_profile {
+            "★ Profil ini dipilih untuk berjalan otomatis setelah login Windows".to_string()
+        } else {
+            "Bukan profil startup saat ini".to_string()
+        };
+
+        let reassignment_notice = previous_startup_profile_name.as_ref().map(|prev_name| {
+            format!(
+                "Saat ini profil startup diatur ke '{}'. Mengaktifkan sakelar ini akan memindahkan profil startup ke profil ini.",
+                prev_name
+            )
+        });
+
+        Self {
+            is_startup_profile,
+            previous_startup_profile_name,
+            switch_label: "Jalankan otomatis saat Windows login",
+            description,
+            reassignment_notice,
+        }
+    }
+
+    /// Menghasilkan pesan informasi keberhasilan pemindahan profil startup.
+    pub fn format_transfer_message(from_name: &str, to_name: &str) -> String {
+        format!(
+            "Profil startup berhasil dipindahkan dari '{}' ke '{}'.",
+            from_name, to_name
+        )
+    }
+
+    /// Menghasilkan pesan informasi pembatalan profil startup.
+    pub fn format_unset_message(name: &str) -> String {
+        format!(
+            "Profil '{}' tidak lagi dijalankan otomatis saat login.",
+            name
+        )
+    }
+}
 
 impl WindowHopView {
     /// Renders the profile detail form panel (flex-1).
@@ -25,22 +95,29 @@ impl WindowHopView {
 
         v_flex()
             .flex_1()
-            .gap_4()
-            .p_4()
             .rounded_lg()
             .border_1()
             .border_color(shadcn.border)
             .bg(shadcn.card)
             .text_color(shadcn.card_foreground)
+            .overflow_hidden()
+            // Area formulir yang dapat di-scroll
             .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(if selected_id.is_some() {
-                        "Edit Profil"
-                    } else {
-                        "Tambah Profil Baru"
-                    }),
-            )
+                v_flex()
+                    .id("form-scroll-body")
+                    .flex_1()
+                    .gap_4()
+                    .p_4()
+                    .overflow_y_scroll()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(if selected_id.is_some() {
+                                "Edit Profil"
+                            } else {
+                                "Tambah Profil Baru"
+                            }),
+                    )
             // Field Nama Profil
             .child(
                 v_flex()
@@ -305,22 +382,26 @@ impl WindowHopView {
                         ),
                 )
             })
-            // Dialog Konfirmasi Penghapusan Profil Aktif
-            .children(self.render_delete_confirmation_dialog(cx))
-            // Pilihan Profil Startup untuk Profil ini
+            // Kartu Pengaturan Profil Startup Dinamis dengan Sakelar Switch
             .when_some(self.selected_profile_id.as_ref(), |this, pid| {
-                let is_this_startup = self.cached_startup_profile_id.as_ref() == Some(pid);
+                let startup_model = StartupCardModel::evaluate(
+                    pid,
+                    self.cached_startup_profile_id.as_ref(),
+                    &self.cached_profiles,
+                );
+                let is_this_startup = startup_model.is_startup_profile;
                 let pid_clone = pid.clone();
                 this.child(
                     h_flex()
+                        .id("startup-settings-card")
                         .justify_between()
                         .items_center()
-                        .p_2p5()
+                        .p_3()
                         .rounded_md()
                         .bg(if is_this_startup {
                             theme.warning.opacity(0.12)
                         } else {
-                            shadcn.muted.opacity(0.2)
+                            shadcn.muted.opacity(0.15)
                         })
                         .border_1()
                         .border_color(if is_this_startup {
@@ -330,12 +411,26 @@ impl WindowHopView {
                         })
                         .child(
                             v_flex()
-                                .gap_0p5()
+                                .gap_1()
                                 .child(
-                                    div()
-                                        .text_xs()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child("Pengaturan Profil Startup:"),
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .child(startup_model.switch_label),
+                                        )
+                                        .when(is_this_startup, |this| {
+                                            this.child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .text_color(theme.warning)
+                                                    .child("★ Profil Startup Aktif"),
+                                            )
+                                        }),
                                 )
                                 .child(
                                     div()
@@ -343,39 +438,40 @@ impl WindowHopView {
                                         .text_color(if is_this_startup {
                                             theme.warning
                                         } else {
-                                            shadcn.muted_foreground
+                                            theme.muted_foreground
                                         })
-                                        .child(if is_this_startup {
-                                            "★ Profil ini dipilih untuk berjalan otomatis setelah login Windows"
-                                        } else {
-                                            "Bukan profil startup saat ini"
-                                        }),
+                                        .child(startup_model.description),
+                                )
+                                .when_some(
+                                    startup_model.reassignment_notice.as_ref(),
+                                    |this, notice| {
+                                        this.child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(theme.warning)
+                                                .child(format!("ℹ {}", notice)),
+                                        )
+                                    },
                                 ),
                         )
                         .child(
-                            Button::new(if is_this_startup {
-                                "btn-unset-startup-profile"
-                            } else {
-                                "btn-set-startup-profile"
-                            })
-                            .label(if is_this_startup {
-                                "Batalkan Profil Startup"
-                            } else {
-                                "Jadikan Profil Startup"
-                            })
-                            .disabled(is_busy)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if is_this_startup {
-                                    this.set_startup_profile(None, cx);
-                                } else {
-                                    this.set_startup_profile(Some(pid_clone.clone()), cx);
-                                }
-                            })),
+                            Switch::new("switch-startup-profile")
+                                .checked(is_this_startup)
+                                .disabled(is_busy)
+                                .on_change(cx.listener(move |this, checked, _, cx| {
+                                    if *checked {
+                                        this.set_startup_profile(Some(pid_clone.clone()), cx);
+                                    } else {
+                                        this.set_startup_profile(None, cx);
+                                    }
+                                })),
                         ),
                 )
-            })
-            // Tombol Aksi
-            .child(self.render_action_bar(cx))
+            }),
+            )
+            // Sticky Bottom Action Bar (tetap terlihat di bagian bawah panel formulir)
+            .child(self.render_action_bar(shadcn, cx))
     }
 
     /// Membuka dialog pemilih folder alternatif untuk penempatan shortcut.
@@ -405,6 +501,61 @@ impl WindowHopView {
                         });
                     }
                 }
+            }
+        })
+        .detach();
+    }
+
+    /// Membuat shortcut untuk profil yang dipilih langsung di Desktop secara instan (1-klik).
+    pub fn create_desktop_shortcut_for_selected_profile(&mut self, cx: &mut Context<Self>) {
+        if self.is_busy {
+            return;
+        }
+        let Some(ref pid) = self.selected_profile_id else {
+            return;
+        };
+
+        self.is_busy = true;
+        let pid = pid.clone();
+        let coordinator = self.coordinator.clone();
+        self.status_message = Some("Membuat shortcut di Desktop...".to_string());
+        self.is_error = false;
+        cx.notify();
+
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                let coord_for_task = coordinator.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        coord_for_task
+                            .lock()
+                            .unwrap()
+                            .create_profile_shortcut(&pid, None)
+                    })
+                    .await;
+
+                cx.update(|cx| {
+                    let _ = this.update(cx, |view, cx| {
+                        view.is_busy = false;
+                        match result {
+                            Ok(shortcut_path) => {
+                                view.status_message = Some(format!(
+                                    "Shortcut berhasil dibuat di Desktop: {}",
+                                    shortcut_path.display()
+                                ));
+                                view.is_error = false;
+                            }
+                            Err(err) => {
+                                view.status_message =
+                                    Some(format!("Gagal membuat shortcut: {}", err));
+                                view.is_error = true;
+                            }
+                        }
+                        cx.notify();
+                    });
+                });
             }
         })
         .detach();
