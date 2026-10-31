@@ -1,13 +1,150 @@
 //! Master sidebar navigation column for Window Hop profile management.
 
 use gpui_kit::component::button::Button;
+use gpui_kit::component::empty::{Empty, EmptyDescription, EmptyHeader, EmptyTitle};
+use gpui_kit::component::input::Input;
+use gpui_kit::component::tag::{Tag as Badge, TagVariant};
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::domain::{ExitReason, ProfileId, ProfileLifecycleState, ProfileStatus};
+use crate::domain::{
+    ExitReason, MonitorIdentity, Profile, ProfileId, ProfileLifecycleState, ProfileStatus,
+};
 use crate::ui::tokens::{ShadcnTokens, SIDEBAR_WIDTH};
 use crate::ui::WindowHopView;
+
+/// Minimum profile count required before the search box appears in the sidebar.
+pub const SEARCH_MIN_PROFILES: usize = 4;
+
+/// Determines whether the profile search box should be displayed.
+pub fn should_show_profile_search(total_profiles: usize) -> bool {
+    total_profiles >= SEARCH_MIN_PROFILES
+}
+
+/// Filters profiles by search query (case-insensitive substring match on profile name).
+/// If query is empty or whitespace-only, returns all profiles.
+pub fn filter_profiles_by_query<'a>(profiles: &'a [Profile], query: &str) -> Vec<&'a Profile> {
+    let trimmed = query.trim().to_lowercase();
+    if trimmed.is_empty() {
+        profiles.iter().collect()
+    } else {
+        profiles
+            .iter()
+            .filter(|p| p.name().to_lowercase().contains(&trimmed))
+            .collect()
+    }
+}
+
+/// Indicator text for unsaved profile configuration changes.
+pub const UNSAVED_CHANGES_INDICATOR: &str = "●";
+
+/// Title displayed in the empty state card when no profiles exist.
+pub(crate) const EMPTY_STATE_TITLE: &str = "Belum Ada Profil";
+
+/// Description displayed in the empty state card when no profiles exist.
+pub(crate) const EMPTY_STATE_DESCRIPTION: &str =
+    "Buat profil baru untuk mengatur browser antrian pada monitor poliklinik.";
+
+/// Form input snapshot used to determine whether a profile has unsaved configuration changes in the form.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProfileFormDraft<'a> {
+    pub name: Option<&'a str>,
+    pub browser_path: Option<&'a str>,
+    pub custom_parameters: Option<&'a str>,
+    pub target_monitor: Option<&'a Option<MonitorIdentity>>,
+}
+
+/// Checks if a profile has unsaved configuration changes (dirty form inputs).
+pub fn profile_has_unsaved_changes(
+    profile: &Profile,
+    form_draft: Option<&ProfileFormDraft<'_>>,
+) -> bool {
+    let Some(draft) = form_draft else {
+        return false;
+    };
+
+    if let Some(name) = draft.name {
+        if name != profile.name() {
+            return true;
+        }
+    }
+    if let Some(path) = draft.browser_path {
+        if path != profile.browser_path().to_string_lossy() {
+            return true;
+        }
+    }
+    if let Some(params) = draft.custom_parameters {
+        if params != profile.custom_parameters() {
+            return true;
+        }
+    }
+    if let Some(target) = draft.target_monitor {
+        if target.as_ref() != profile.target_monitor() {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Badge text for profile configured as Windows startup profile (includes pin icon).
+pub const STARTUP_BADGE_LABEL: &str = "📌 [Startup]";
+
+/// Semantic shadcn status badge representation for a profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileStatusBadge {
+    pub label: &'static str,
+    pub variant: TagVariant,
+}
+
+impl ProfileStatusBadge {
+    /// Determines the semantic badge label and variant based on lifecycle state and profile readiness.
+    pub fn for_profile(lifecycle: &ProfileLifecycleState, status: ProfileStatus) -> Self {
+        match lifecycle {
+            ProfileLifecycleState::Running { .. } => Self {
+                label: "Aktif",
+                variant: TagVariant::Success,
+            },
+            ProfileLifecycleState::WaitingForMonitor { .. } => Self {
+                label: "Menunggu",
+                variant: TagVariant::Warning,
+            },
+            ProfileLifecycleState::Disconnected { .. } => Self {
+                label: "Terputus",
+                variant: TagVariant::Warning,
+            },
+            ProfileLifecycleState::Exited { reason } => match reason {
+                ExitReason::Crash => Self {
+                    label: "Crash",
+                    variant: TagVariant::Danger,
+                },
+                ExitReason::ManualClose => Self {
+                    label: "Berhenti",
+                    variant: TagVariant::Secondary,
+                },
+            },
+            ProfileLifecycleState::Idle => match status {
+                ProfileStatus::DraftNotReady => Self {
+                    label: "Draft",
+                    variant: TagVariant::Secondary,
+                },
+                ProfileStatus::Ready => Self {
+                    label: "Siap",
+                    variant: TagVariant::Primary,
+                },
+                ProfileStatus::TargetUnavailable => Self {
+                    label: "Tidak Tersedia",
+                    variant: TagVariant::Warning,
+                },
+                ProfileStatus::TargetAmbiguous => Self {
+                    label: "Ambigu",
+                    variant: TagVariant::Danger,
+                },
+            },
+        }
+    }
+}
 
 impl WindowHopView {
     /// Renders the master navigation sidebar (fixed 320 px).
@@ -21,6 +158,9 @@ impl WindowHopView {
         let selected_id = self.selected_profile_id.clone();
         let available_monitors = &self.cached_monitors;
         let is_busy = self.is_busy;
+        let search_query = self.search_input.read(cx).value().to_string();
+        let show_search = should_show_profile_search(profiles.len());
+        let filtered_profiles = filter_profiles_by_query(&profiles, &search_query);
 
         v_flex()
             .w(SIDEBAR_WIDTH)
@@ -49,17 +189,37 @@ impl WindowHopView {
                             })),
                     ),
             )
+            .when(show_search, |this| {
+                this.child(div().child(Input::new(&self.search_input)))
+            })
             .child(if profiles.is_empty() {
+                Empty::new()
+                    .header(
+                        EmptyHeader::new()
+                            .title(EmptyTitle::new().child(EMPTY_STATE_TITLE))
+                            .description(EmptyDescription::new().child(EMPTY_STATE_DESCRIPTION)),
+                    )
+                    .child(
+                        Button::new("btn-empty-new-profile")
+                            .label("+ Buat Profil Pertama")
+                            .disabled(is_busy)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.select_profile(None, window, cx);
+                            })),
+                    )
+                    .into_any_element()
+            } else if filtered_profiles.is_empty() {
                 div()
                     .p_4()
                     .text_sm()
+                    .text_center()
                     .text_color(shadcn.muted_foreground)
-                    .child("Belum ada profil. Klik '+ Profil Baru' untuk membuat.")
+                    .child("Tidak ada profil yang cocok dengan pencarian.")
                     .into_any_element()
             } else {
                 v_flex()
                     .gap_2()
-                    .children(profiles.into_iter().map(|p| {
+                    .children(filtered_profiles.into_iter().map(|p| {
                         let is_selected = selected_id.as_ref() == Some(p.id());
                         let pid = p.id().clone();
                         let p_status = p.evaluate_status(available_monitors);
@@ -81,27 +241,11 @@ impl WindowHopView {
                         };
                         let item_id = SharedString::from(format!("profile-item-{}", pid));
 
-                        let (status_text, status_color) = match &p_lifecycle {
-                            ProfileLifecycleState::Running { .. } => ("● Aktif", theme.primary),
-                            ProfileLifecycleState::WaitingForMonitor { .. } => {
-                                ("Menunggu", theme.warning)
-                            }
-                            ProfileLifecycleState::Disconnected { .. } => {
-                                ("Terputus", theme.warning)
-                            }
-                            ProfileLifecycleState::Exited { reason } => match reason {
-                                ExitReason::Crash => ("Crash", theme.danger),
-                                ExitReason::ManualClose => ("Berhenti", shadcn.muted_foreground),
-                            },
-                            ProfileLifecycleState::Idle => match p_status {
-                                ProfileStatus::DraftNotReady => ("Draft", shadcn.muted_foreground),
-                                ProfileStatus::Ready => ("Siap", theme.primary),
-                                ProfileStatus::TargetUnavailable => {
-                                    ("Tidak Tersedia", theme.warning)
-                                }
-                                ProfileStatus::TargetAmbiguous => ("Ambigu", theme.danger),
-                            },
-                        };
+                        let status_badge = ProfileStatusBadge::for_profile(&p_lifecycle, p_status);
+                        let is_startup = self.cached_startup_profile_id.as_ref() == Some(p.id());
+                        let has_unsaved = self.has_unsaved_changes(p.id(), cx);
+
+                        let select_pid = pid.clone();
 
                         div()
                             .id(item_id)
@@ -112,7 +256,7 @@ impl WindowHopView {
                             .bg(bg)
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.select_profile(Some(pid.clone()), window, cx);
+                                this.select_profile(Some(select_pid.clone()), window, cx);
                             }))
                             .child(
                                 v_flex()
@@ -130,37 +274,31 @@ impl WindowHopView {
                                                             .font_weight(FontWeight::MEDIUM)
                                                             .child(p.name().to_string()),
                                                     )
-                                                    .when(
-                                                        Some(p.id())
-                                                            == self
-                                                                .cached_startup_profile_id
-                                                                .as_ref(),
-                                                        |this| {
-                                                            this.child(
-                                                                div()
-                                                                    .text_xs()
-                                                                    .px_1p5()
-                                                                    .py_0p5()
-                                                                    .rounded_sm()
-                                                                    .bg(theme.warning.opacity(0.18))
-                                                                    .text_color(theme.warning)
-                                                                    .font_weight(
-                                                                        FontWeight::SEMIBOLD,
-                                                                    )
-                                                                    .child("★ Startup"),
-                                                            )
-                                                        },
-                                                    ),
+                                                    .when(is_startup, |this| {
+                                                        this.child(
+                                                            Badge::new()
+                                                                .with_variant(TagVariant::Warning)
+                                                                .child(STARTUP_BADGE_LABEL),
+                                                        )
+                                                    })
+                                                    .when(has_unsaved, |this| {
+                                                        this.child(
+                                                            div()
+                                                                .id(SharedString::from(format!(
+                                                                    "dot-unsaved-{}",
+                                                                    pid
+                                                                )))
+                                                                .text_xs()
+                                                                .text_color(theme.warning)
+                                                                .font_weight(FontWeight::BOLD)
+                                                                .child(UNSAVED_CHANGES_INDICATOR),
+                                                        )
+                                                    }),
                                             )
                                             .child(
-                                                div()
-                                                    .text_xs()
-                                                    .px_2()
-                                                    .py_0p5()
-                                                    .rounded_sm()
-                                                    .bg(shadcn.muted)
-                                                    .text_color(status_color)
-                                                    .child(status_text),
+                                                Badge::new()
+                                                    .with_variant(status_badge.variant)
+                                                    .child(status_badge.label),
                                             ),
                                     )
                                     .child(

@@ -29,7 +29,7 @@ pub(crate) mod browser_picker;
 pub(crate) mod dialogs;
 pub(crate) mod form;
 pub(crate) mod monitor_card;
-pub(crate) mod sidebar;
+pub mod sidebar;
 pub mod tokens;
 
 pub use tokens::*;
@@ -57,6 +57,7 @@ pub struct WindowHopView {
     pub(crate) path_input: Entity<InputState>,
     pub(crate) params_input: Entity<InputState>,
     pub(crate) shortcut_folder_input: Entity<InputState>,
+    pub(crate) search_input: Entity<InputState>,
     pub(crate) status_message: Option<String>,
     pub(crate) is_error: bool,
     pub(crate) confirming_delete_profile: Option<ProfileId>,
@@ -91,6 +92,14 @@ impl WindowHopView {
             InputState::new(window, cx)
                 .placeholder("Default: Desktop (atau masukkan jalur folder alternatif)")
         });
+        let search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Cari nama profil..."));
+
+        // Observasi input untuk re-rendering instan saat pengguna mengetik (filter pencarian & indikator dot perubahan)
+        cx.observe(&search_input, |_, _, cx| cx.notify()).detach();
+        cx.observe(&name_input, |_, _, cx| cx.notify()).detach();
+        cx.observe(&path_input, |_, _, cx| cx.notify()).detach();
+        cx.observe(&params_input, |_, _, cx| cx.notify()).detach();
 
         let (
             initial_error,
@@ -177,6 +186,7 @@ impl WindowHopView {
             path_input,
             params_input,
             shortcut_folder_input,
+            search_input,
             status_message: initial_error,
             is_error,
             confirming_delete_profile: None,
@@ -361,6 +371,28 @@ impl WindowHopView {
             }
         })
         .detach();
+    }
+
+    /// Memeriksa apakah profil memiliki perubahan konfigurasi form yang belum disimpan.
+    pub(crate) fn has_unsaved_changes(&self, pid: &ProfileId, cx: &App) -> bool {
+        let Some(profile) = self.cached_profiles.iter().find(|p| p.id() == pid) else {
+            return false;
+        };
+        if self.selected_profile_id.as_ref() != Some(pid) {
+            return false;
+        }
+
+        let name = self.name_input.read(cx).value().to_string();
+        let path = self.path_input.read(cx).value().to_string();
+        let params = self.params_input.read(cx).value().to_string();
+        let draft = sidebar::ProfileFormDraft {
+            name: Some(&name),
+            browser_path: Some(&path),
+            custom_parameters: Some(&params),
+            target_monitor: Some(&self.selected_target_monitor),
+        };
+
+        sidebar::profile_has_unsaved_changes(profile, Some(&draft))
     }
 }
 
