@@ -668,25 +668,36 @@ fn test_browser_compatibility_badge_variants() {
 
 #[test]
 fn test_form_bidirectional_parameter_sync_and_validation() {
-    use window_hop::ui::form::validate_advanced_parameters;
+    use window_hop::browsers::LaunchParameters;
 
     // 1. Valid advanced parameters
-    assert!(validate_advanced_parameters("--disable-gpu --lang=id", None).is_ok());
-    assert!(validate_advanced_parameters("", None).is_ok());
+    assert!(LaunchParameters::validate_advanced_isolation("--disable-gpu --lang=id", None).is_ok());
+    assert!(LaunchParameters::validate_advanced_isolation("", None).is_ok());
 
-    // 2. Conflicting isolation parameters are rejected
-    let err_user_data = validate_advanced_parameters(r#"--user-data-dir="C:\ChromeData""#, None);
+    // 2. Conflicting isolation parameters in advanced parameters are rejected
+    let err_user_data =
+        LaunchParameters::validate_advanced_isolation(r#"--user-data-dir="C:\ChromeData""#, None);
     assert!(err_user_data.is_err());
 
-    let err_profile_dir = validate_advanced_parameters(r#"--profile-directory="Profile 1""#, None);
+    let err_profile_dir =
+        LaunchParameters::validate_advanced_isolation(r#"--profile-directory="Profile 1""#, None);
     assert!(err_profile_dir.is_err());
 
-    let err_firefox_profile = validate_advanced_parameters("-profile /tmp/firefox", None);
+    let err_firefox_profile =
+        LaunchParameters::validate_advanced_isolation("-profile /tmp/firefox", None);
     assert!(err_firefox_profile.is_err());
 
     // 3. Unterminated quotes
-    let err_unclosed = validate_advanced_parameters(r#"--custom="unclosed"#, None);
+    let err_unclosed = LaunchParameters::validate_advanced_isolation(r#"--custom="unclosed"#, None);
     assert!(err_unclosed.is_err());
+
+    // 4. Conflicting isolation parameters injected via URL input are also rejected
+    let lp_malicious_url = LaunchParameters::new(
+        r#"https://antrian.local --user-data-dir="C:\Bypass""#,
+        true,
+        "",
+    );
+    assert!(lp_malicious_url.validate_isolation(None).is_err());
 }
 
 #[test]
@@ -714,6 +725,26 @@ fn test_form_kiosk_and_url_unsaved_changes_detection() {
         target_monitor: Some(&None),
     };
     assert!(!profile_has_unsaved_changes(&p, Some(&draft_matching)));
+
+    // Legacy profile with alternate flag ordering (--kiosk --app=URL) does not trigger false dirty state
+    let legacy_profile = Profile::new_draft(
+        ProfileId::new("p-legacy"),
+        "Antrian Poli Bedah",
+        PathBuf::from(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+        "--kiosk --app=https://antrian.poli/bedah",
+    );
+    let legacy_parsed = LaunchParameters::parse(legacy_profile.custom_parameters()).unwrap();
+    let legacy_composed = legacy_parsed.compose();
+    let draft_legacy = ProfileFormDraft {
+        name: Some(legacy_profile.name()),
+        browser_path: Some(legacy_profile.browser_path().to_str().unwrap()),
+        custom_parameters: Some(&legacy_composed),
+        target_monitor: Some(&None),
+    };
+    assert!(!profile_has_unsaved_changes(
+        &legacy_profile,
+        Some(&draft_legacy)
+    ));
 
     // User changes URL
     let changed_url = LaunchParameters::compose_from(

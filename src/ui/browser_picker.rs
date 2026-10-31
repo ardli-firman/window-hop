@@ -48,8 +48,6 @@ impl BrowserQuickTileModel {
             "🧭"
         } else if lower.contains("brave") {
             "🦁"
-        } else if lower.contains("firefox") {
-            "🦊"
         } else {
             "🖥"
         }
@@ -363,9 +361,21 @@ impl WindowHopView {
                                                     ),
                                             )
                                             .child(
-                                                Badge::new()
-                                                    .with_variant(compat_badge.variant)
-                                                    .child(compat_badge.label.clone()),
+                                                div()
+                                                    .id("badge-compat-safe")
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.status_message = Some(
+                                                            "Browser Terverifikasi: Mendukung isolasi sesi penuh (--user-data-dir terpisah) dan kepemilikan instance profil tanpa mengganggu sesi perawat.".to_string(),
+                                                        );
+                                                        this.is_error = false;
+                                                        cx.notify();
+                                                    }))
+                                                    .child(
+                                                        Badge::new()
+                                                            .with_variant(compat_badge.variant)
+                                                            .child(compat_badge.label.clone()),
+                                                    ),
                                             ),
                                     )
                                     .child(
@@ -421,9 +431,21 @@ impl WindowHopView {
                                                     ),
                                             )
                                             .child(
-                                                Badge::new()
-                                                    .with_variant(compat_badge.variant)
-                                                    .child(compat_badge.label.clone()),
+                                                div()
+                                                    .id("badge-compat-unverified")
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.status_message = Some(
+                                                            "Browser Belum Diverifikasi: Executable ditemukan pada disk namun belum terdaftar sebagai adapter teruji isolasi sesi. Gate aktivasi ditahan demi keamanan.".to_string(),
+                                                        );
+                                                        this.is_error = false;
+                                                        cx.notify();
+                                                    }))
+                                                    .child(
+                                                        Badge::new()
+                                                            .with_variant(compat_badge.variant)
+                                                            .child(compat_badge.label.clone()),
+                                                    ),
                                             ),
                                     )
                                     .child(

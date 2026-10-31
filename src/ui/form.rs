@@ -9,18 +9,8 @@ use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::browsers::{BrowserAdapter, BrowserError, LaunchParameters};
 use crate::ui::tokens::ShadcnTokens;
 use crate::ui::WindowHopView;
-
-/// Memvalidasi apakah parameter baris perintah kustom tingkat lanjut berbenturan
-/// dengan isolasi sesi browser profil.
-pub fn validate_advanced_parameters(
-    advanced: &str,
-    adapter: Option<&BrowserAdapter>,
-) -> Result<(), BrowserError> {
-    LaunchParameters::new("", false, advanced).validate_isolation(adapter)
-}
 
 impl WindowHopView {
     /// Renders the profile detail form panel (flex-1).
@@ -115,7 +105,6 @@ impl WindowHopView {
                             .disabled(is_busy)
                             .on_change(cx.listener(|this, checked, _, cx| {
                                 this.kiosk_mode = *checked;
-                                this.sync_composed_parameters(cx);
                                 cx.notify();
                             })),
                     ),

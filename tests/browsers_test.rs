@@ -2,9 +2,9 @@ use std::path::PathBuf;
 use window_hop::browsers::{
     detect_browser_support, evaluate_browser_compatibility, is_brave_executable,
     is_firefox_executable, parse_windows_command_line, read_executable_architecture, BraveAdapter,
-    BrowserArchitecture, BrowserCompatibilityStatus, BrowserError, BrowserSupportStatus,
-    ChromeAdapter, DetectedBrowser, EdgeAdapter, FirefoxAdapter, LaunchParameters,
-    LoginRetentionNote,
+    BrowserAdapter, BrowserArchitecture, BrowserCompatibilityStatus, BrowserError,
+    BrowserSupportStatus, ChromeAdapter, DetectedBrowser, EdgeAdapter, FirefoxAdapter,
+    LaunchParameters, LoginRetentionNote,
 };
 
 #[test]
@@ -1174,6 +1174,16 @@ fn test_smart_bidirectional_parser_roundtrip_composition() {
     let lp4 = LaunchParameters::new("", false, "");
     assert_eq!(lp4.compose(), "");
     assert_eq!(LaunchParameters::parse("").unwrap(), lp4);
+
+    // 5. Firefox adapter compose does not prepend --app=
+    let firefox_adapter = BrowserAdapter::Firefox(FirefoxAdapter::new());
+    let lp_ff = LaunchParameters::new("https://antrian.poli/mata", true, "--private-window");
+    let ff_composed = lp_ff.compose_for(Some(&firefox_adapter));
+    assert_eq!(
+        ff_composed,
+        "https://antrian.poli/mata --kiosk --private-window"
+    );
+    assert!(!ff_composed.contains("--app="));
 }
 
 #[test]
@@ -1187,6 +1197,14 @@ fn test_smart_bidirectional_parser_rejects_conflicting_isolation_parameters() {
         }
         other => panic!("expected ConflictingIsolationParameter, got: {:?}", other),
     }
+
+    // Conflicting isolation arguments in URL field are also rejected
+    let lp_url_attack = LaunchParameters::new(
+        "https://antrian.local --user-data-dir=C:\\custom",
+        false,
+        "",
+    );
+    assert!(lp_url_attack.validate_isolation(None).is_err());
 
     // Profile-directory rejected
     let lp2 = LaunchParameters::new(

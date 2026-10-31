@@ -75,8 +75,19 @@ pub fn profile_has_unsaved_changes(
         }
     }
     if let Some(params) = draft.custom_parameters {
-        if params != profile.custom_parameters() {
-            return true;
+        let p_lp = crate::browsers::LaunchParameters::parse(profile.custom_parameters());
+        let d_lp = crate::browsers::LaunchParameters::parse(params);
+        match (p_lp, d_lp) {
+            (Ok(p), Ok(d)) => {
+                if p != d {
+                    return true;
+                }
+            }
+            _ => {
+                if params != profile.custom_parameters() {
+                    return true;
+                }
+            }
         }
     }
     if let Some(target) = draft.target_monitor {

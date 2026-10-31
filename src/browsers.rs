@@ -101,6 +101,12 @@ pub fn parse_windows_command_line(input: &str) -> Result<Vec<String>, BrowserErr
     Ok(args)
 }
 
+/// Helper untuk membungkus argumen berpetik dan melakukan escape backslash dan tanda petik.
+fn escape_and_quote_arg(val: &str) -> String {
+    let escaped = val.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{}\"", escaped)
+}
+
 /// Parameter peluncuran yang dipetakan secara dua arah (bi-directional) antara field
 /// domain `custom_parameters` dengan UI form: URL antrian, switch kiosk, dan parameter tingkat lanjut.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -145,18 +151,15 @@ impl LaunchParameters {
             let token = &parsed_tokens[i];
             let lower = token.to_ascii_lowercase();
 
-            // Cek kiosk flag (--kiosk, -kiosk, /kiosk)
-            if lower == "--kiosk" || lower == "-kiosk" || lower == "/kiosk" {
+            // Cek kiosk flag (--kiosk)
+            if lower == "--kiosk" {
                 kiosk = true;
                 i += 1;
                 continue;
             }
 
-            // Cek app flag dengan format key=val: --app=URL, -app=URL, /app=URL
-            let is_app_prefix = lower.starts_with("--app=")
-                || lower.starts_with("-app=")
-                || lower.starts_with("/app=");
-            if is_app_prefix {
+            // Cek app flag dengan format key=val: --app=URL
+            if lower.starts_with("--app=") {
                 let eq_idx = token.find('=').unwrap();
                 let extracted_url = token[eq_idx + 1..].trim();
                 if url.is_empty() {
@@ -168,10 +171,8 @@ impl LaunchParameters {
                 continue;
             }
 
-            // Cek two-token app: --app <URL>, -app <URL>, /app <URL>
-            if (lower == "--app" || lower == "-app" || lower == "/app")
-                && i + 1 < parsed_tokens.len()
-            {
+            // Cek two-token app: --app <URL>
+            if lower == "--app" && i + 1 < parsed_tokens.len() {
                 if url.is_empty() {
                     url = parsed_tokens[i + 1].trim().to_string();
                 } else {
@@ -200,14 +201,12 @@ impl LaunchParameters {
             if tok.contains(' ') || tok.contains('\t') || tok.contains('"') {
                 if let Some((key, val)) = tok.split_once('=') {
                     if val.contains(' ') || val.contains('\t') || val.contains('"') {
-                        let escaped = val.replace('\\', "\\\\").replace('"', "\\\"");
-                        advanced_parts.push(format!("{}=\"{}\"", key, escaped));
+                        advanced_parts.push(format!("{}={}", key, escape_and_quote_arg(val)));
                     } else {
                         advanced_parts.push(tok);
                     }
                 } else {
-                    let escaped = tok.replace('\\', "\\\\").replace('"', "\\\"");
-                    advanced_parts.push(format!("\"{}\"", escaped));
+                    advanced_parts.push(escape_and_quote_arg(&tok));
                 }
             } else {
                 advanced_parts.push(tok);
@@ -225,17 +224,27 @@ impl LaunchParameters {
     /// Menyusun kembali field `url`, `kiosk`, dan `advanced_parameters` menjadi satu string `custom_parameters`
     /// yang siap disimpan ke domain `Profile` atau digunakan untuk peluncuran browser.
     pub fn compose(&self) -> String {
+        self.compose_for(None)
+    }
+
+    /// Menyusun kembali parameter peluncuran dengan mempertimbangkan adapter browser sasaran.
+    /// Untuk browser Chromium (Chrome, Edge, Brave), URL dibungkus dengan `--app=`.
+    /// Untuk Firefox, URL diluncurkan secara langsung tanpa flag `--app=`.
+    pub fn compose_for(&self, adapter: Option<&BrowserAdapter>) -> String {
         let mut parts = Vec::new();
 
         let clean_url = self.url.trim();
         if !clean_url.is_empty() {
-            if clean_url.contains(' ') || clean_url.contains('\t') || clean_url.contains('"') {
-                if clean_url.contains('"') {
-                    let escaped = clean_url.replace('\\', "\\\\").replace('"', "\\\"");
-                    parts.push(format!("--app=\"{}\"", escaped));
+            let is_firefox = matches!(adapter, Some(BrowserAdapter::Firefox(_)));
+            if is_firefox {
+                if clean_url.contains(' ') || clean_url.contains('\t') || clean_url.contains('"') {
+                    parts.push(escape_and_quote_arg(clean_url));
                 } else {
-                    parts.push(format!("--app=\"{}\"", clean_url));
+                    parts.push(clean_url.to_string());
                 }
+            } else if clean_url.contains(' ') || clean_url.contains('\t') || clean_url.contains('"')
+            {
+                parts.push(format!("--app={}", escape_and_quote_arg(clean_url)));
             } else {
                 parts.push(format!("--app={}", clean_url));
             }
@@ -258,22 +267,40 @@ impl LaunchParameters {
         Self::new(url, kiosk, advanced_parameters).compose()
     }
 
-    /// Memvalidasi apakah parameter tingkat lanjut mengandung argumen terlarang yang berbenturan
-    /// dengan isolasi sesi browser profil.
+    /// Memvalidasi apakah string parameter baris perintah kustom tingkat lanjut mengandung argumen terlarang.
+    pub fn validate_advanced_isolation(
+        advanced: &str,
+        adapter: Option<&BrowserAdapter>,
+    ) -> Result<(), BrowserError> {
+        Self::new("", false, advanced).validate_isolation(adapter)
+    }
+
+    /// Memvalidasi apakah parameter (baik URL maupun parameter tingkat lanjut) mengandung argumen
+    /// terlarang yang berbenturan dengan isolasi sesi browser profil.
     pub fn validate_isolation(&self, adapter: Option<&BrowserAdapter>) -> Result<(), BrowserError> {
+        let trimmed_url = self.url.trim();
+        if !trimmed_url.is_empty() {
+            let parsed_url = parse_windows_command_line(trimmed_url)?;
+            if let Some(ad) = adapter {
+                ad.validate_parsed_arguments(&parsed_url)?;
+            } else {
+                validate_chromium_arguments(&parsed_url)?;
+                validate_firefox_arguments(&parsed_url)?;
+            }
+        }
+
         let trimmed_adv = self.advanced_parameters.trim();
         if trimmed_adv.is_empty() {
             return Ok(());
         }
 
-        let parsed = parse_windows_command_line(trimmed_adv)?;
-
+        let parsed_adv = parse_windows_command_line(trimmed_adv)?;
         if let Some(ad) = adapter {
-            ad.validate_parsed_arguments(&parsed)?;
+            ad.validate_parsed_arguments(&parsed_adv)?;
         } else {
             // Validasi umum terhadap semua prefix isolasi sesi Chromium dan Firefox
-            validate_chromium_arguments(&parsed)?;
-            validate_firefox_arguments(&parsed)?;
+            validate_chromium_arguments(&parsed_adv)?;
+            validate_firefox_arguments(&parsed_adv)?;
         }
 
         Ok(())
