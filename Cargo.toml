@@ -1,6 +1,6 @@
 [package]
 name = "window-hop"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["Window Hop Contributors"]
 description = "Window Hop multi-display queue browser manager"
