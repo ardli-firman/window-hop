@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -49,12 +50,148 @@ impl WindowHopView {
             )
             // Subkomponen Browser Picker
             .child(self.render_browser_picker(cx))
-            // Field Parameter Peluncuran Kustom
+            // Field URL Antrian Poliklinik
             .child(
                 v_flex()
                     .gap_1()
-                    .child(div().text_sm().child("Parameter Peluncuran Kustom:"))
-                    .child(Input::new(&self.params_input)),
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child("URL Antrian Poliklinik:"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Otomatis dijalankan dalam mode windowed app (--app)"),
+                            ),
+                    )
+                    .child(Input::new(&self.url_input)),
+            )
+            // Sakelar Switch Mode Kiosk Layar Penuh
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .p_3()
+                    .rounded_md()
+                    .bg(shadcn.muted.opacity(0.15))
+                    .border_1()
+                    .border_color(shadcn.border)
+                    .child(
+                        v_flex()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child("Mode Kiosk Layar Penuh (--kiosk)"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Menampilkan jendela antrian secara layar penuh tanpa bilah alamat atau batas jendela"),
+                            ),
+                    )
+                    .child(
+                        Switch::new("switch-kiosk")
+                            .checked(self.kiosk_mode)
+                            .disabled(is_busy)
+                            .on_change(cx.listener(|this, checked, _, cx| {
+                                this.kiosk_mode = *checked;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            // Parameter Baris Perintah Kustom Tingkat Lanjut (Collapsible / Accordion)
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(
+                        h_flex()
+                            .id("toggle-advanced-params")
+                            .justify_between()
+                            .items_center()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.is_advanced_params_open = !this.is_advanced_params_open;
+                                cx.notify();
+                            }))
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(if self.is_advanced_params_open { "▼" } else { "▶" }),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child("Parameter Baris Perintah Kustom Tingkat Lanjut (Opsional)"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(if self.is_advanced_params_open { "Tutup" } else { "Buka Pengaturan Lanjutan" }),
+                            ),
+                    )
+                    .when(self.is_advanced_params_open, |this| {
+                        this.child(
+                            v_flex()
+                                .gap_2()
+                                .p_3()
+                                .rounded_md()
+                                .bg(shadcn.muted.opacity(0.1))
+                                .border_1()
+                                .border_color(shadcn.border)
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child("Gunakan untuk flag baris perintah kustom tambahan (misal: --disable-gpu atau --lang=id). Parameter yang berbenturan dengan isolasi profil (seperti --user-data-dir) ditolak secara otomatis."),
+                                )
+                                .child(Input::new(&self.advanced_params_input))
+                                .when_some(self.advanced_params_error.as_ref(), |this, err| {
+                                    this.child(
+                                        div()
+                                            .p_2()
+                                            .rounded_md()
+                                            .bg(theme.danger.opacity(0.12))
+                                            .border_1()
+                                            .border_color(theme.danger)
+                                            .child(
+                                                v_flex()
+                                                    .gap_0p5()
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                            .text_color(theme.danger)
+                                                            .child("⚠ Parameter Isolasi Terlarang Ditolak"),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(theme.danger)
+                                                            .child(err.clone()),
+                                                    ),
+                                            ),
+                                    )
+                                }),
+                        )
+                    }),
             )
             // Subkomponen Monitor Card
             .child(self.render_monitor_card(cx))

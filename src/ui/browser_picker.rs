@@ -4,12 +4,107 @@ use std::path::PathBuf;
 
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;
+use gpui_kit::component::tag::{Tag as Badge, TagVariant};
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::browsers::{BrowserCompatibilityStatus, DetectedBrowser};
+use crate::browsers::{BrowserArchitecture, BrowserCompatibilityStatus, DetectedBrowser};
 use crate::ui::WindowHopView;
+
+/// Model visual untuk Quick Tile browser yang terdeteksi pada sistem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserQuickTileModel {
+    pub name: String,
+    pub executable_path: PathBuf,
+    pub version: Option<String>,
+    pub architecture: BrowserArchitecture,
+    pub is_selected: bool,
+    pub is_verified: bool,
+}
+
+impl BrowserQuickTileModel {
+    pub fn from_detected(browser: &DetectedBrowser, current_selected_path: &str) -> Self {
+        let is_selected = !current_selected_path.trim().is_empty()
+            && browser
+                .executable_path
+                .to_string_lossy()
+                .eq_ignore_ascii_case(current_selected_path.trim());
+        Self {
+            name: browser.name.clone(),
+            executable_path: browser.executable_path.clone(),
+            version: browser.version.clone(),
+            architecture: browser.architecture,
+            is_selected,
+            is_verified: browser.is_verified(),
+        }
+    }
+
+    pub fn brand_icon(&self) -> &'static str {
+        let lower = self.name.to_ascii_lowercase();
+        if lower.contains("chrome") {
+            "🌐"
+        } else if lower.contains("edge") {
+            "🧭"
+        } else if lower.contains("brave") {
+            "🦁"
+        } else {
+            "🖥"
+        }
+    }
+
+    pub fn status_badge(&self) -> (&'static str, TagVariant) {
+        if self.is_verified {
+            ("Terverifikasi", TagVariant::Success)
+        } else {
+            ("Belum Diverifikasi", TagVariant::Warning)
+        }
+    }
+
+    pub fn subtitle(&self) -> String {
+        let arch_str = format!("{}", self.architecture);
+        if let Some(ref ver) = self.version {
+            format!("{} • v{}", arch_str, ver)
+        } else {
+            arch_str
+        }
+    }
+}
+
+/// Badge informatif untuk status kompatibilitas isolasi sesi browser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserCompatibilityBadge {
+    pub label: String,
+    pub variant: TagVariant,
+    pub is_safe: bool,
+}
+
+impl BrowserCompatibilityBadge {
+    pub fn for_status(status: Option<&BrowserCompatibilityStatus>) -> Self {
+        match status {
+            Some(BrowserCompatibilityStatus::SafeToActivate { .. }) => Self {
+                label: "Terverifikasi".to_string(),
+                variant: TagVariant::Success,
+                is_safe: true,
+            },
+            Some(BrowserCompatibilityStatus::Unverified { .. }) => Self {
+                label: "Belum Diverifikasi".to_string(),
+                variant: TagVariant::Warning,
+                is_safe: false,
+            },
+            Some(BrowserCompatibilityStatus::Unavailable { .. }) => Self {
+                label: "Tidak Tersedia".to_string(),
+                variant: TagVariant::Danger,
+                is_safe: false,
+            },
+            None => Self {
+                label: "Belum Dipilih".to_string(),
+                variant: TagVariant::Secondary,
+                is_safe: false,
+            },
+        }
+    }
+}
 
 impl WindowHopView {
     /// Renders the detected browser selection list, manual executable path input, and compatibility status card.
@@ -72,33 +167,31 @@ impl WindowHopView {
                     .child({
                         if self.cached_detected_browsers.is_empty() {
                             div()
-                                .p_2()
+                                .p_3()
                                 .rounded_md()
-                                .bg(theme.muted)
+                                .bg(theme.muted.opacity(0.3))
+                                .border_1()
+                                .border_color(theme.border)
                                 .text_xs()
                                 .text_color(theme.muted_foreground)
-                                .child("Tidak ada instalasi browser yang terdeteksi otomatis. Silakan gunakan pemilihan file executable manual di bawah.")
+                                .child("Tidak ada instalasi browser yang terdeteksi otomatis pada sistem. Silakan gunakan pemilihan file executable .exe manual di bawah.")
                         } else {
-                            let current_path = self.path_input.read(cx).value().trim().to_ascii_lowercase();
+                            let current_path = self.path_input.read(cx).value().trim().to_string();
                             let detected_list = self.cached_detected_browsers.clone();
 
                             div().child(
                                 h_flex()
-                                    .gap_2()
+                                    .gap_3()
                                     .flex_wrap()
                                     .children(detected_list.into_iter().enumerate().map(|(idx, b)| {
-                                        let is_selected = !current_path.is_empty()
-                                            && b.executable_path.to_string_lossy().to_ascii_lowercase() == current_path;
+                                        let tile = BrowserQuickTileModel::from_detected(&b, &current_path);
+                                        let (status_label, status_variant) = tile.status_badge();
+                                        let is_selected = tile.is_selected;
+
                                         let (bg, border) = if is_selected {
-                                            (theme.accent.opacity(0.3), theme.primary)
+                                            (theme.primary.opacity(0.12), theme.primary)
                                         } else {
-                                            (theme.muted.opacity(0.3), theme.border)
-                                        };
-                                        let is_verified = b.is_verified();
-                                        let status_badge = if is_verified {
-                                            ("Terverifikasi", theme.primary)
-                                        } else {
-                                            ("Belum Diverifikasi", theme.warning)
+                                            (theme.muted.opacity(0.2), theme.border)
                                         };
 
                                         let item_id = SharedString::from(format!("detected-browser-item-{}", idx));
@@ -106,8 +199,10 @@ impl WindowHopView {
 
                                         div()
                                             .id(item_id)
-                                            .p_2()
-                                            .rounded_md()
+                                            .p_3()
+                                            .min_w(px(210.0))
+                                            .flex_1()
+                                            .rounded_lg()
                                             .border_1()
                                             .border_color(border)
                                             .bg(bg)
@@ -117,40 +212,47 @@ impl WindowHopView {
                                             }))
                                             .child(
                                                 v_flex()
-                                                    .gap_0p5()
+                                                    .gap_1p5()
                                                     .child(
                                                         h_flex()
-                                                            .gap_2()
-                                                            .items_center()
                                                             .justify_between()
+                                                            .items_center()
                                                             .child(
-                                                                div()
-                                                                    .text_xs()
-                                                                    .font_weight(FontWeight::MEDIUM)
-                                                                    .child(b.name.clone()),
+                                                                h_flex()
+                                                                    .gap_2()
+                                                                    .items_center()
+                                                                    .child(div().text_base().child(tile.brand_icon()))
+                                                                    .child(
+                                                                        div()
+                                                                            .text_sm()
+                                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                                            .child(tile.name.clone()),
+                                                                    ),
                                                             )
-                                                            .child(
+                                                            .child(if is_selected {
                                                                 div()
                                                                     .text_xs()
+                                                                    .font_weight(FontWeight::BOLD)
                                                                     .text_color(theme.primary)
-                                                                    .child(if is_selected { "✓ Terpilih" } else { "" }),
-                                                            ),
+                                                                    .child("✓ Terpilih")
+                                                            } else {
+                                                                div()
+                                                            }),
                                                     )
                                                     .child(
                                                         h_flex()
-                                                            .gap_2()
+                                                            .justify_between()
                                                             .items_center()
                                                             .child(
                                                                 div()
                                                                     .text_xs()
                                                                     .text_color(theme.muted_foreground)
-                                                                    .child(format!("{}", b.architecture)),
+                                                                    .child(tile.subtitle()),
                                                             )
                                                             .child(
-                                                                div()
-                                                                    .text_xs()
-                                                                    .text_color(status_badge.1)
-                                                                    .child(format!("[{}]", status_badge.0)),
+                                                                Badge::new()
+                                                                    .with_variant(status_variant)
+                                                                    .child(status_label),
                                                             ),
                                                     ),
                                             )
@@ -206,6 +308,8 @@ impl WindowHopView {
                     }
                 }
 
+                let compat_badge = BrowserCompatibilityBadge::for_status(self.cached_browser_compatibility.as_ref());
+
                 match self.cached_browser_compatibility.as_ref() {
                     None => {
                         div()
@@ -236,20 +340,42 @@ impl WindowHopView {
                                     .gap_1()
                                     .child(
                                         h_flex()
-                                            .gap_2()
+                                            .justify_between()
                                             .items_center()
                                             .child(
-                                                div()
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_xs()
-                                                    .text_color(theme.primary)
-                                                    .child("✓ Status Dukungan: Aman Diaktifkan (Terverifikasi)"),
+                                                h_flex()
+                                                    .gap_2()
+                                                    .items_center()
+                                                    .child(
+                                                        div()
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                            .text_xs()
+                                                            .text_color(theme.primary)
+                                                            .child("Status Dukungan: Aman Diaktifkan"),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(theme.muted_foreground)
+                                                            .child(format!("{}{} [{}]", evidence.browser_name, version_text, evidence.architecture)),
+                                                    ),
                                             )
                                             .child(
                                                 div()
-                                                    .text_xs()
-                                                    .text_color(theme.muted_foreground)
-                                                    .child(format!("{}{} [{}]", evidence.browser_name, version_text, evidence.architecture)),
+                                                    .id("badge-compat-safe")
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.status_message = Some(
+                                                            "Browser Terverifikasi: Mendukung isolasi sesi penuh (--user-data-dir terpisah) dan kepemilikan instance profil tanpa mengganggu sesi perawat.".to_string(),
+                                                        );
+                                                        this.is_error = false;
+                                                        cx.notify();
+                                                    }))
+                                                    .child(
+                                                        Badge::new()
+                                                            .with_variant(compat_badge.variant)
+                                                            .child(compat_badge.label.clone()),
+                                                    ),
                                             ),
                                     )
                                     .child(
@@ -284,20 +410,42 @@ impl WindowHopView {
                                     .gap_1()
                                     .child(
                                         h_flex()
-                                            .gap_2()
+                                            .justify_between()
                                             .items_center()
                                             .child(
-                                                div()
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_xs()
-                                                    .text_color(theme.warning)
-                                                    .child("⚠ Status Dukungan: Ditemukan (Belum Diverifikasi)"),
+                                                h_flex()
+                                                    .gap_2()
+                                                    .items_center()
+                                                    .child(
+                                                        div()
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                            .text_xs()
+                                                            .text_color(theme.warning)
+                                                            .child("Status Dukungan: Ditemukan"),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(theme.muted_foreground)
+                                                            .child(format!("{}{} [{}]", evidence.browser_name, version_text, evidence.architecture)),
+                                                    ),
                                             )
                                             .child(
                                                 div()
-                                                    .text_xs()
-                                                    .text_color(theme.muted_foreground)
-                                                    .child(format!("{}{} [{}]", evidence.browser_name, version_text, evidence.architecture)),
+                                                    .id("badge-compat-unverified")
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.status_message = Some(
+                                                            "Browser Belum Diverifikasi: Executable ditemukan pada disk namun belum terdaftar sebagai adapter teruji isolasi sesi. Gate aktivasi ditahan demi keamanan.".to_string(),
+                                                        );
+                                                        this.is_error = false;
+                                                        cx.notify();
+                                                    }))
+                                                    .child(
+                                                        Badge::new()
+                                                            .with_variant(compat_badge.variant)
+                                                            .child(compat_badge.label.clone()),
+                                                    ),
                                             ),
                                     )
                                     .child(
@@ -324,11 +472,21 @@ impl WindowHopView {
                                 v_flex()
                                     .gap_1()
                                     .child(
-                                        div()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_xs()
-                                            .text_color(theme.danger)
-                                            .child("✕ Status Dukungan: Executable Tidak Tersedia / Tidak Ditemukan"),
+                                        h_flex()
+                                            .justify_between()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_xs()
+                                                    .text_color(theme.danger)
+                                                    .child("Status Dukungan: Executable Tidak Tersedia"),
+                                            )
+                                            .child(
+                                                Badge::new()
+                                                    .with_variant(compat_badge.variant)
+                                                    .child(compat_badge.label.clone()),
+                                            ),
                                     )
                                     .child(
                                         div()

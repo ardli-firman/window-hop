@@ -4,6 +4,9 @@ use std::path::PathBuf;
 
 use gpui_kit::component::tag::TagVariant;
 use gpui_kit::px;
+use window_hop::browsers::{
+    BrowserArchitecture, BrowserCompatibilityStatus, BrowserSupportEvidence, DetectedBrowser,
+};
 use window_hop::domain::{
     ExitReason, MonitorDescriptor, MonitorIdentity, ProcessId, Profile, ProfileId,
     ProfileLifecycleState, ProfileStatus, TargetMonitorStatus,
@@ -18,9 +21,9 @@ use window_hop::ui::tokens::{
     WINDOW_MIN_WIDTH,
 };
 use window_hop::ui::{
-    find_occupying_profile, MonitorCardModel, WindowHopView, DISCONNECTED_BADGE,
-    DISCONNECTED_WARNING, MONITOR_POLL_INTERVAL, NURSE_PRIMARY_BADGE, NURSE_PRIMARY_WARNING,
-    RECOMMENDED_QUEUE_BADGE,
+    find_occupying_profile, BrowserCompatibilityBadge, BrowserQuickTileModel, MonitorCardModel,
+    WindowHopView, DISCONNECTED_BADGE, DISCONNECTED_WARNING, MONITOR_POLL_INTERVAL,
+    NURSE_PRIMARY_BADGE, NURSE_PRIMARY_WARNING, RECOMMENDED_QUEUE_BADGE,
 };
 
 #[test]
@@ -531,4 +534,249 @@ fn test_monitor_polling_interval_and_cable_change_detection() {
         }
         other => panic!("expected Available on reconnect, got {:?}", other),
     }
+}
+
+#[test]
+fn test_browser_quick_tile_model_selection_and_badges() {
+    let chrome_browser = DetectedBrowser {
+        name: "Google Chrome".to_string(),
+        executable_path: PathBuf::from(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+        version: Some("122.0.6261.95".to_string()),
+        architecture: BrowserArchitecture::X64,
+    };
+    let edge_browser = DetectedBrowser {
+        name: "Microsoft Edge".to_string(),
+        executable_path: PathBuf::from(
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        ),
+        version: Some("120.0.2210.144".to_string()),
+        architecture: BrowserArchitecture::X86,
+    };
+    let brave_browser = DetectedBrowser {
+        name: "Brave Browser".to_string(),
+        executable_path: PathBuf::from(
+            r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+        ),
+        version: None,
+        architecture: BrowserArchitecture::X64,
+    };
+    let unverified_browser = DetectedBrowser {
+        name: "Custom Embedded Browser".to_string(),
+        executable_path: PathBuf::from(r"C:\Custom\custom_browser.exe"),
+        version: None,
+        architecture: BrowserArchitecture::Unknown,
+    };
+
+    // 1. Selection matching (case-insensitive)
+    let chrome_tile = BrowserQuickTileModel::from_detected(
+        &chrome_browser,
+        r"c:\program files\google\chrome\application\chrome.exe",
+    );
+    assert!(chrome_tile.is_selected);
+    assert_eq!(chrome_tile.brand_icon(), "🌐");
+    assert_eq!(
+        chrome_tile.status_badge(),
+        ("Terverifikasi", TagVariant::Success)
+    );
+    assert_eq!(chrome_tile.subtitle(), "x64 (64-bit) • v122.0.6261.95");
+
+    // 2. Unselected Edge
+    let edge_tile = BrowserQuickTileModel::from_detected(&edge_browser, r"C:\other\path.exe");
+    assert!(!edge_tile.is_selected);
+    assert_eq!(edge_tile.brand_icon(), "🧭");
+    assert_eq!(
+        edge_tile.status_badge(),
+        ("Terverifikasi", TagVariant::Success)
+    );
+    assert_eq!(edge_tile.subtitle(), "x86 (32-bit) • v120.0.2210.144");
+
+    // 3. Brave Browser
+    let brave_tile = BrowserQuickTileModel::from_detected(
+        &brave_browser,
+        r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+    );
+    assert!(brave_tile.is_selected);
+    assert_eq!(brave_tile.brand_icon(), "🦁");
+    assert_eq!(
+        brave_tile.status_badge(),
+        ("Terverifikasi", TagVariant::Success)
+    );
+    assert_eq!(brave_tile.subtitle(), "x64 (64-bit)");
+
+    // 4. Unverified Browser gets Warning badge
+    let unverified_tile = BrowserQuickTileModel::from_detected(&unverified_browser, "");
+    assert!(!unverified_tile.is_selected);
+    assert_eq!(
+        unverified_tile.status_badge(),
+        ("Belum Diverifikasi", TagVariant::Warning)
+    );
+}
+
+#[test]
+fn test_browser_compatibility_badge_variants() {
+    // 1. SafeToActivate
+    let safe_status = BrowserCompatibilityStatus::SafeToActivate {
+        adapter: window_hop::browsers::BrowserAdapter::Chrome(
+            window_hop::browsers::ChromeAdapter::new(),
+        ),
+        evidence: BrowserSupportEvidence {
+            browser_name: "Google Chrome".to_string(),
+            version: Some("122.0.0".to_string()),
+            architecture: BrowserArchitecture::X64,
+            is_safe_to_activate: true,
+            evidence_text: "Terverifikasi".to_string(),
+            limitations: None,
+        },
+    };
+    let badge_safe = BrowserCompatibilityBadge::for_status(Some(&safe_status));
+    assert_eq!(badge_safe.label, "Terverifikasi");
+    assert_eq!(badge_safe.variant, TagVariant::Success);
+    assert!(badge_safe.is_safe);
+
+    // 2. Unverified
+    let unverified_status = BrowserCompatibilityStatus::Unverified {
+        evidence: BrowserSupportEvidence {
+            browser_name: "Custom Browser".to_string(),
+            version: None,
+            architecture: BrowserArchitecture::Unknown,
+            is_safe_to_activate: false,
+            evidence_text: "Belum teruji".to_string(),
+            limitations: None,
+        },
+    };
+    let badge_unverified = BrowserCompatibilityBadge::for_status(Some(&unverified_status));
+    assert_eq!(badge_unverified.label, "Belum Diverifikasi");
+    assert_eq!(badge_unverified.variant, TagVariant::Warning);
+    assert!(!badge_unverified.is_safe);
+
+    // 3. Unavailable
+    let unavailable_status = BrowserCompatibilityStatus::Unavailable {
+        path: PathBuf::from("nonexistent.exe"),
+        reason: "File tidak ditemukan".to_string(),
+    };
+    let badge_unavailable = BrowserCompatibilityBadge::for_status(Some(&unavailable_status));
+    assert_eq!(badge_unavailable.label, "Tidak Tersedia");
+    assert_eq!(badge_unavailable.variant, TagVariant::Danger);
+    assert!(!badge_unavailable.is_safe);
+
+    // 4. None
+    let badge_none = BrowserCompatibilityBadge::for_status(None);
+    assert_eq!(badge_none.label, "Belum Dipilih");
+    assert_eq!(badge_none.variant, TagVariant::Secondary);
+    assert!(!badge_none.is_safe);
+}
+
+#[test]
+fn test_form_bidirectional_parameter_sync_and_validation() {
+    use window_hop::browsers::LaunchParameters;
+
+    // 1. Valid advanced parameters
+    assert!(LaunchParameters::validate_advanced_isolation("--disable-gpu --lang=id", None).is_ok());
+    assert!(LaunchParameters::validate_advanced_isolation("", None).is_ok());
+
+    // 2. Conflicting isolation parameters in advanced parameters are rejected
+    let err_user_data =
+        LaunchParameters::validate_advanced_isolation(r#"--user-data-dir="C:\ChromeData""#, None);
+    assert!(err_user_data.is_err());
+
+    let err_profile_dir =
+        LaunchParameters::validate_advanced_isolation(r#"--profile-directory="Profile 1""#, None);
+    assert!(err_profile_dir.is_err());
+
+    let err_firefox_profile =
+        LaunchParameters::validate_advanced_isolation("-profile /tmp/firefox", None);
+    assert!(err_firefox_profile.is_err());
+
+    // 3. Unterminated quotes
+    let err_unclosed = LaunchParameters::validate_advanced_isolation(r#"--custom="unclosed"#, None);
+    assert!(err_unclosed.is_err());
+
+    // 4. Conflicting isolation parameters injected via URL input are also rejected
+    let lp_malicious_url = LaunchParameters::new(
+        r#"https://antrian.local --user-data-dir="C:\Bypass""#,
+        true,
+        "",
+    );
+    assert!(lp_malicious_url.validate_isolation(None).is_err());
+}
+
+#[test]
+fn test_form_kiosk_and_url_unsaved_changes_detection() {
+    use window_hop::browsers::LaunchParameters;
+
+    let p = Profile::new_draft(
+        ProfileId::new("p-queue"),
+        "Antrian Poli Bedah",
+        PathBuf::from(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+        "--app=https://antrian.poli/bedah --kiosk",
+    );
+
+    // Initial state matching profile: no unsaved changes
+    let lp = LaunchParameters::parse(p.custom_parameters()).unwrap();
+    assert_eq!(lp.url, "https://antrian.poli/bedah");
+    assert!(lp.kiosk);
+    assert_eq!(lp.advanced_parameters, "");
+
+    let matching_composed = lp.compose();
+    let draft_matching = ProfileFormDraft {
+        name: Some(p.name()),
+        browser_path: Some(p.browser_path().to_str().unwrap()),
+        custom_parameters: Some(&matching_composed),
+        target_monitor: Some(&None),
+    };
+    assert!(!profile_has_unsaved_changes(&p, Some(&draft_matching)));
+
+    // Legacy profile with alternate flag ordering (--kiosk --app=URL) does not trigger false dirty state
+    let legacy_profile = Profile::new_draft(
+        ProfileId::new("p-legacy"),
+        "Antrian Poli Bedah",
+        PathBuf::from(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+        "--kiosk --app=https://antrian.poli/bedah",
+    );
+    let legacy_parsed = LaunchParameters::parse(legacy_profile.custom_parameters()).unwrap();
+    let legacy_composed = legacy_parsed.compose();
+    let draft_legacy = ProfileFormDraft {
+        name: Some(legacy_profile.name()),
+        browser_path: Some(legacy_profile.browser_path().to_str().unwrap()),
+        custom_parameters: Some(&legacy_composed),
+        target_monitor: Some(&None),
+    };
+    assert!(!profile_has_unsaved_changes(
+        &legacy_profile,
+        Some(&draft_legacy)
+    ));
+
+    // User changes URL
+    let changed_url = LaunchParameters::compose_from(
+        "https://antrian.poli/rawat-jalan",
+        lp.kiosk,
+        &lp.advanced_parameters,
+    );
+    let draft_changed_url = ProfileFormDraft {
+        name: Some(p.name()),
+        browser_path: Some(p.browser_path().to_str().unwrap()),
+        custom_parameters: Some(&changed_url),
+        target_monitor: Some(&None),
+    };
+    assert!(profile_has_unsaved_changes(&p, Some(&draft_changed_url)));
+
+    // User toggles Kiosk mode off
+    let toggled_kiosk = LaunchParameters::compose_from(&lp.url, false, &lp.advanced_parameters);
+    let draft_toggled_kiosk = ProfileFormDraft {
+        name: Some(p.name()),
+        browser_path: Some(p.browser_path().to_str().unwrap()),
+        custom_parameters: Some(&toggled_kiosk),
+        target_monitor: Some(&None),
+    };
+    assert!(profile_has_unsaved_changes(&p, Some(&draft_toggled_kiosk)));
+
+    // User adds advanced parameter
+    let added_advanced = LaunchParameters::compose_from(&lp.url, lp.kiosk, "--disable-gpu");
+    let draft_added_advanced = ProfileFormDraft {
+        name: Some(p.name()),
+        browser_path: Some(p.browser_path().to_str().unwrap()),
+        custom_parameters: Some(&added_advanced),
+        target_monitor: Some(&None),
+    };
+    assert!(profile_has_unsaved_changes(&p, Some(&draft_added_advanced)));
 }

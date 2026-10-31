@@ -32,6 +32,7 @@ pub(crate) mod monitor_card;
 pub mod sidebar;
 pub mod tokens;
 
+pub use browser_picker::{BrowserCompatibilityBadge, BrowserQuickTileModel};
 pub use monitor_card::{
     find_occupying_profile, MonitorCardModel, DISCONNECTED_BADGE, DISCONNECTED_WARNING,
     MONITOR_POLL_INTERVAL, NURSE_PRIMARY_BADGE, NURSE_PRIMARY_WARNING, RECOMMENDED_QUEUE_BADGE,
@@ -59,7 +60,11 @@ pub struct WindowHopView {
     pub(crate) window_handle: AnyWindowHandle,
     pub(crate) name_input: Entity<InputState>,
     pub(crate) path_input: Entity<InputState>,
-    pub(crate) params_input: Entity<InputState>,
+    pub(crate) url_input: Entity<InputState>,
+    pub(crate) kiosk_mode: bool,
+    pub(crate) advanced_params_input: Entity<InputState>,
+    pub(crate) is_advanced_params_open: bool,
+    pub(crate) advanced_params_error: Option<String>,
     pub(crate) shortcut_folder_input: Entity<InputState>,
     pub(crate) search_input: Entity<InputState>,
     pub(crate) status_message: Option<String>,
@@ -89,9 +94,11 @@ impl WindowHopView {
             InputState::new(window, cx)
                 .placeholder(r"C:\Program Files\Google\Chrome\Application\chrome.exe")
         });
-        let params_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("--app=https://antrian.local --kiosk")
+        let url_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("misal: https://antrian.rumahsakit.local/poli")
         });
+        let advanced_params_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("misal: --disable-gpu --lang=id"));
         let shortcut_folder_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Default: Desktop (atau masukkan jalur folder alternatif)")
@@ -103,7 +110,23 @@ impl WindowHopView {
         cx.observe(&search_input, |_, _, cx| cx.notify()).detach();
         cx.observe(&name_input, |_, _, cx| cx.notify()).detach();
         cx.observe(&path_input, |_, _, cx| cx.notify()).detach();
-        cx.observe(&params_input, |_, _, cx| cx.notify()).detach();
+        cx.observe(&url_input, |_, _, cx| cx.notify()).detach();
+        cx.observe(&advanced_params_input, |this, _, cx| {
+            let raw = this.advanced_params_input.read(cx).value().to_string();
+            let adapter = this
+                .cached_browser_compatibility
+                .as_ref()
+                .and_then(|c| c.adapter());
+            this.advanced_params_error =
+                crate::browsers::LaunchParameters::validate_advanced_isolation(
+                    &raw,
+                    adapter.as_ref(),
+                )
+                .err()
+                .map(|e| e.to_string());
+            cx.notify();
+        })
+        .detach();
 
         let (
             initial_error,
@@ -239,7 +262,11 @@ impl WindowHopView {
             window_handle: window.window_handle(),
             name_input,
             path_input,
-            params_input,
+            url_input,
+            kiosk_mode: true,
+            advanced_params_input,
+            is_advanced_params_open: false,
+            advanced_params_error: None,
             shortcut_folder_input,
             search_input,
             status_message: initial_error,
@@ -316,7 +343,11 @@ impl WindowHopView {
                 let name = profile.name().to_string();
                 let path = profile.browser_path().to_string_lossy().to_string();
                 let params = profile.custom_parameters().to_string();
+                let parsed = crate::browsers::LaunchParameters::parse(&params).unwrap_or_default();
                 self.selected_target_monitor = profile.target_monitor().cloned();
+                self.kiosk_mode = parsed.kiosk;
+                self.is_advanced_params_open = !parsed.advanced_parameters.is_empty();
+                self.advanced_params_error = None;
 
                 self.name_input.update(cx, |input, cx| {
                     input.set_value(name, window, cx);
@@ -324,31 +355,44 @@ impl WindowHopView {
                 self.path_input.update(cx, |input, cx| {
                     input.set_value(path, window, cx);
                 });
-                self.params_input.update(cx, |input, cx| {
-                    input.set_value(params, window, cx);
+                self.url_input.update(cx, |input, cx| {
+                    input.set_value(parsed.url, window, cx);
+                });
+                self.advanced_params_input.update(cx, |input, cx| {
+                    input.set_value(parsed.advanced_parameters, window, cx);
                 });
                 self.shortcut_folder_input.update(cx, |input, cx| {
                     input.set_value("", window, cx);
                 });
             }
         } else {
-            // Reset input form untuk profil baru
-            self.selected_target_monitor = None;
-            self.name_input.update(cx, |input, cx| {
-                input.set_value("", window, cx);
-            });
-            self.path_input.update(cx, |input, cx| {
-                input.set_value("", window, cx);
-            });
-            self.params_input.update(cx, |input, cx| {
-                input.set_value("", window, cx);
-            });
-            self.shortcut_folder_input.update(cx, |input, cx| {
-                input.set_value("", window, cx);
-            });
+            self.reset_form_inputs(window, cx);
         }
 
         cx.notify();
+    }
+
+    /// Mengatur ulang input formulir ke kondisi kosong / profil baru.
+    pub(crate) fn reset_form_inputs(&mut self, window: &mut Window, cx: &mut App) {
+        self.selected_target_monitor = None;
+        self.kiosk_mode = true;
+        self.is_advanced_params_open = false;
+        self.advanced_params_error = None;
+        self.name_input.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+        });
+        self.path_input.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+        });
+        self.url_input.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+        });
+        self.advanced_params_input.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+        });
+        self.shortcut_folder_input.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+        });
     }
 
     /// Menyimpan profil draft atau profil dengan monitor tujuan secara asinkron tanpa memblokir thread UI.
@@ -361,7 +405,26 @@ impl WindowHopView {
 
         let name = self.name_input.read(cx).value().to_string();
         let path_str = self.path_input.read(cx).value().to_string();
-        let params = self.params_input.read(cx).value().to_string();
+        let url = self.url_input.read(cx).value().to_string();
+        let kiosk = self.kiosk_mode;
+        let advanced = self.advanced_params_input.read(cx).value().to_string();
+
+        // Validasi parameter lanjutan terhadap parameter isolasi sesi terlarang
+        let adapter = self
+            .cached_browser_compatibility
+            .as_ref()
+            .and_then(|c| c.adapter());
+        let lp = crate::browsers::LaunchParameters::new(&url, kiosk, &advanced);
+        if let Err(err) = lp.validate_isolation(adapter.as_ref()) {
+            self.advanced_params_error = Some(err.to_string());
+            self.is_advanced_params_open = true;
+            self.status_message = Some(format!("Parameter baris perintah ditolak: {}", err));
+            self.is_error = true;
+            cx.notify();
+            return;
+        }
+        self.advanced_params_error = None;
+        let params = lp.compose_for(adapter.as_ref());
 
         let browser_path = PathBuf::from(path_str.trim());
         let input = DraftProfileInput::new(name, browser_path, params)
@@ -439,7 +502,10 @@ impl WindowHopView {
 
         let name = self.name_input.read(cx).value().to_string();
         let path = self.path_input.read(cx).value().to_string();
-        let params = self.params_input.read(cx).value().to_string();
+        let url = self.url_input.read(cx).value().to_string();
+        let kiosk = self.kiosk_mode;
+        let advanced = self.advanced_params_input.read(cx).value().to_string();
+        let params = crate::browsers::LaunchParameters::compose_from(&url, kiosk, &advanced);
         let draft = sidebar::ProfileFormDraft {
             name: Some(&name),
             browser_path: Some(&path),
