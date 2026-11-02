@@ -81,6 +81,34 @@ fn test_file_profile_store_returns_empty_default_when_file_not_found() {
         .expect("should return default config if file does not exist");
     assert_eq!(loaded.schema_version(), 1);
     assert!(loaded.profiles().is_empty());
+    assert!(
+        loaded.startup_enabled(),
+        "Default config loaded from non-existent file must have startup_enabled: true"
+    );
+}
+
+#[test]
+fn test_file_profile_store_default_and_opt_out_persistence() {
+    let dir = tempdir().expect("temp dir");
+    let file_path = dir.path().join("profiles_opt_out.json");
+    let store = FileProfileStore::new(&file_path);
+
+    // Initial load when file does not exist returns default config with startup_enabled: true
+    let mut config = store.load().expect("load default config");
+    assert!(config.startup_enabled());
+
+    // Save initial config
+    store.save(&config).expect("save initial config");
+
+    let loaded = store.load().expect("load saved config");
+    assert!(loaded.startup_enabled());
+
+    // User opts out via settings
+    config.set_startup_enabled(false);
+    store.save(&config).expect("save opt-out config");
+
+    let reloaded = store.load().expect("load opt-out config");
+    assert!(!reloaded.startup_enabled());
 }
 
 #[test]

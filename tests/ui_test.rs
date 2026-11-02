@@ -1314,17 +1314,18 @@ fn test_settings_modal_and_dashboard_header_startup_migration() {
     // 5. Verification of pure lifecycle state in application coordinator for startup preferences
     let store = Arc::new(MemoryProfileStore::new());
     let mut coordinator = LifecycleCoordinator::from_store(store);
-    let startup_manager = Arc::new(MockStartupManager::new(false));
+    let startup_manager = Arc::new(MockStartupManager::new(true));
     coordinator.set_startup_manager(startup_manager.clone());
 
-    assert!(!coordinator.startup_enabled());
+    // By default, startup_enabled is true for zero-touch setup
+    assert!(coordinator.startup_enabled());
 
     // Toggling startup updates coordinator preference and OS registration
-    coordinator.set_startup_enabled(true).unwrap();
-    assert!(coordinator.startup_enabled());
-    assert!(startup_manager.is_registered());
-
     coordinator.set_startup_enabled(false).unwrap();
     assert!(!coordinator.startup_enabled());
     assert!(!startup_manager.is_registered());
+
+    coordinator.set_startup_enabled(true).unwrap();
+    assert!(coordinator.startup_enabled());
+    assert!(startup_manager.is_registered());
 }

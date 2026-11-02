@@ -382,12 +382,16 @@ impl Profile {
     }
 }
 
+fn default_startup_enabled() -> bool {
+    true
+}
+
 /// Konfigurasi aplikasi Window Hop yang dipersistensikan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppConfig {
     schema_version: u32,
     profiles: Vec<Profile>,
-    #[serde(default)]
+    #[serde(default = "default_startup_enabled")]
     startup_enabled: bool,
     #[serde(default)]
     startup_profile_id: Option<ProfileId>,
@@ -399,7 +403,7 @@ impl AppConfig {
         Self {
             schema_version,
             profiles,
-            startup_enabled: false,
+            startup_enabled: true,
             startup_profile_id: None,
         }
     }
@@ -460,7 +464,7 @@ impl Default for AppConfig {
         Self {
             schema_version: 1,
             profiles: Vec::new(),
-            startup_enabled: false,
+            startup_enabled: true,
             startup_profile_id: None,
         }
     }
