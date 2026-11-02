@@ -405,7 +405,7 @@ impl Default for WindowsShortcutCreator {
 }
 
 /// Membuat file shortcut (.lnk) Windows secara native menggunakan Win32 COM API (IShellLinkW & IPersistFile).
-/// Tidak memanggil PowerShell atau WScript.Shell sehingga tidak memicu alarm AMSI / antivirus.
+/// Tidak memanggil external script host sehingga bebas dari alarm AMSI dan antivirus.
 pub fn create_windows_shortcut(
     shortcut_path: &std::path::Path,
     target_exe: &std::path::Path,

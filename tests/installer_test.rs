@@ -557,3 +557,60 @@ fn test_parse_version_string_major_minor() {
     assert_eq!(parse_version_string_major_minor("10").unwrap(), (10, 0));
     assert!(parse_version_string_major_minor("invalid").is_err());
 }
+
+#[test]
+fn test_entire_src_tree_has_zero_powershell_and_no_silent_script_hosts() {
+    let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files_to_check = Vec::new();
+
+    fn collect_rs_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_rs_files(&path, files);
+                } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                    files.push(path);
+                }
+            }
+        }
+    }
+
+    collect_rs_files(&src_dir, &mut files_to_check);
+    assert!(
+        !files_to_check.is_empty(),
+        "src directory must contain .rs files"
+    );
+
+    for file_path in files_to_check {
+        let content = std::fs::read_to_string(&file_path)
+            .unwrap_or_else(|_| panic!("Failed to read {}", file_path.display()));
+        let lower = content.to_ascii_lowercase();
+
+        assert!(
+            !lower.contains("powershell"),
+            "File {} contains forbidden keyword 'powershell'",
+            file_path.display()
+        );
+        assert!(
+            !lower.contains("wscript"),
+            "File {} contains forbidden keyword 'wscript'",
+            file_path.display()
+        );
+        assert!(
+            !lower.contains("cscript"),
+            "File {} contains forbidden keyword 'cscript'",
+            file_path.display()
+        );
+        assert!(
+            !content.contains("CREATE_NO_WINDOW"),
+            "File {} contains forbidden flag 'CREATE_NO_WINDOW'",
+            file_path.display()
+        );
+        assert!(
+            !content.contains("new_silent_powershell_cmd"),
+            "File {} contains forbidden helper 'new_silent_powershell_cmd'",
+            file_path.display()
+        );
+    }
+}
