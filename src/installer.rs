@@ -337,38 +337,9 @@ fn create_windows_shortcut(
     target_exe: &Path,
     args: &str,
 ) -> Result<(), InstallError> {
-    if let Some(parent) = shortcut_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let workdir = target_exe.parent().unwrap_or(shortcut_path);
-
-    // Escape single quotes in paths to prevent tokenization or injection issues in PowerShell
-    let lnk_str = shortcut_path.to_string_lossy().replace('\'', "''");
-    let target_str = target_exe.to_string_lossy().replace('\'', "''");
-    let arg_str = args.replace('\'', "''");
-    let dir_str = workdir.to_string_lossy().replace('\'', "''");
-
-    let ps_script = format!(
-        "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut('{lnk_str}'); $s.TargetPath = '{target_str}'; $s.Arguments = '{arg_str}'; $s.WorkingDirectory = '{dir_str}'; $s.Save()"
-    );
-
-    let output = new_silent_powershell_cmd()
-        .arg("-NoProfile")
-        .arg("-NonInteractive")
-        .arg("-Command")
-        .arg(&ps_script)
-        .output()
-        .map_err(|e| InstallError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(InstallError::VerificationFailed(format!(
-            "Gagal membuat shortcut: {}",
-            stderr.trim()
-        )));
-    }
-
-    Ok(())
+    let workdir = target_exe.parent();
+    crate::platform::windows::create_windows_shortcut(shortcut_path, target_exe, args, workdir)
+        .map_err(|e| InstallError::VerificationFailed(e.to_string()))
 }
 
 #[cfg(windows)]
