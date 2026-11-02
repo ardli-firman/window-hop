@@ -13,7 +13,6 @@ use crate::ui::WindowHopView;
 /// Model representasi dialog modal Pengaturan Aplikasi.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsModalModel {
-    pub is_open: bool,
     pub title: &'static str,
     pub description: &'static str,
     pub startup_enabled: bool,
@@ -24,50 +23,33 @@ pub struct SettingsModalModel {
 }
 
 impl SettingsModalModel {
-    /// Membuat model modal pengaturan dalam kondisi tertutup secara default.
-    pub fn new() -> Self {
+    /// Mengevaluasi data tampilan modal pengaturan dari status preferensi startup saat ini.
+    pub fn evaluate(enabled: bool, startup_profile_name: Option<&str>) -> Self {
+        let (startup_description, startup_status_text) = if enabled {
+            let status_text = match startup_profile_name {
+                Some(name) => format!("Aktif · Profil startup: {}", name),
+                None => "Aktif · Belum ada profil startup yang dipilih".to_string(),
+            };
+            (
+                "Window Hop akan otomatis berjalan di latar belakang (system tray) saat login Windows.",
+                status_text,
+            )
+        } else {
+            (
+                "Window Hop tidak akan dijalankan otomatis saat login Windows.",
+                "Nonaktif · Aktifkan agar antrian siap setelah login".to_string(),
+            )
+        };
+
         Self {
-            is_open: false,
             title: "Pengaturan Aplikasi",
             description: "Kelola preferensi startup Windows dan konfigurasi aplikasi.",
-            startup_enabled: false,
+            startup_enabled: enabled,
             startup_switch_label: "Mulai otomatis saat login Windows",
-            startup_description: "Window Hop tidak akan dijalankan otomatis saat login Windows.",
-            startup_status_text: "Nonaktif · Aktifkan agar antrian siap setelah login".to_string(),
+            startup_description,
+            startup_status_text,
             close_button_label: "Tutup",
         }
-    }
-
-    /// Membuka modal pengaturan dengan status preferensi startup saat ini.
-    pub fn open(&mut self, enabled: bool, startup_profile_name: Option<&str>) {
-        self.is_open = true;
-        self.set_startup_enabled(enabled, startup_profile_name);
-    }
-
-    /// Menutup modal pengaturan.
-    pub fn close(&mut self) {
-        self.is_open = false;
-    }
-
-    /// Memperbarui preferensi startup dan teks penjelasnya di dalam modal.
-    pub fn set_startup_enabled(&mut self, enabled: bool, startup_profile_name: Option<&str>) {
-        self.startup_enabled = enabled;
-        self.startup_description = if enabled {
-            "Window Hop akan otomatis berjalan di latar belakang (system tray) saat login Windows."
-        } else {
-            "Window Hop tidak akan dijalankan otomatis saat login Windows."
-        };
-        self.startup_status_text = match (enabled, startup_profile_name) {
-            (true, Some(name)) => format!("Aktif · Profil startup: {}", name),
-            (true, None) => "Aktif · Belum ada profil startup yang dipilih".to_string(),
-            (false, _) => "Nonaktif · Aktifkan agar antrian siap setelah login".to_string(),
-        };
-    }
-}
-
-impl Default for SettingsModalModel {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -165,15 +147,13 @@ impl WindowHopView {
 
         let theme = cx.theme().clone();
         let is_busy = self.is_busy;
-        let startup_profile_name = self.cached_startup_profile_id.as_ref().and_then(|sid| {
-            self.cached_profiles
-                .iter()
-                .find(|p| p.id() == sid)
-                .map(|p| p.name())
-        });
+        let startup_profile_name = self
+            .cached_startup_profile_id
+            .as_ref()
+            .and_then(|sid| self.find_cached_profile(sid))
+            .map(|p| p.name());
 
-        let mut model = SettingsModalModel::new();
-        model.open(self.cached_startup_enabled, startup_profile_name);
+        let model = SettingsModalModel::evaluate(self.cached_startup_enabled, startup_profile_name);
 
         Some(
             div()

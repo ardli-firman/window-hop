@@ -37,7 +37,9 @@ pub mod tokens;
 
 pub use action_bar::{ActionBarAction, ActionBarModel, ActionKind, ShortcutOptionsModel};
 pub use browser_picker::{BrowserCompatibilityBadge, BrowserQuickTileModel};
-pub use dashboard::{DashboardHeaderModel, DashboardStats, HeaderButtonModel, ProfileCardModel};
+pub use dashboard::{
+    DashboardHeaderModel, DashboardStats, HeaderActionKind, HeaderButtonModel, ProfileCardModel,
+};
 pub use dialogs::{DeleteConfirmationModalModel, SettingsModalModel};
 pub use form::StartupCardModel;
 pub use monitor_card::{

@@ -22,13 +22,29 @@ use crate::ui::WindowHopView;
 /// Number of profile cards per row on the dashboard grid.
 pub const DASHBOARD_GRID_COLUMNS: u16 = 2;
 
+/// Jenis aksi tombol pada header dashboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderActionKind {
+    Settings,
+    AddProfile,
+}
+
 /// Model aksi tombol di header dashboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderButtonModel {
+    pub kind: HeaderActionKind,
     pub id: &'static str,
     pub label: &'static str,
-    pub icon_name: &'static str,
     pub is_disabled: bool,
+}
+
+impl HeaderButtonModel {
+    pub fn icon(&self) -> IconName {
+        match self.kind {
+            HeaderActionKind::Settings => IconName::Settings,
+            HeaderActionKind::AddProfile => IconName::Plus,
+        }
+    }
 }
 
 /// Model representasi header dashboard dan tombol aksinya.
@@ -42,15 +58,15 @@ impl DashboardHeaderModel {
     pub fn evaluate(is_busy: bool) -> Self {
         Self {
             settings_button: HeaderButtonModel {
+                kind: HeaderActionKind::Settings,
                 id: "btn-open-settings",
                 label: "Pengaturan",
-                icon_name: "Settings",
                 is_disabled: is_busy,
             },
             add_profile_button: HeaderButtonModel {
+                kind: HeaderActionKind::AddProfile,
                 id: "btn-add-profile",
                 label: "+ Profil Baru",
-                icon_name: "Plus",
                 is_disabled: is_busy,
             },
         }
@@ -198,11 +214,6 @@ impl WindowHopView {
     pub(crate) fn render_dashboard(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let profiles = self.cached_profiles.clone();
-        let stats = DashboardStats::from_profiles(
-            &profiles,
-            &self.cached_running_ids,
-            self.cached_startup_profile_id.as_ref(),
-        );
         let header_model = DashboardHeaderModel::evaluate(self.is_busy);
         let search_query = self.search_input.read(cx).value().to_string();
         let show_search = should_show_profile_search(profiles.len());
@@ -244,7 +255,7 @@ impl WindowHopView {
                             .gap_2()
                             .child(
                                 Button::new(header_model.settings_button.id)
-                                    .icon(IconName::Settings)
+                                    .icon(header_model.settings_button.icon())
                                     .label(header_model.settings_button.label)
                                     .disabled(header_model.settings_button.is_disabled)
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -254,7 +265,7 @@ impl WindowHopView {
                             .child(
                                 Button::new(header_model.add_profile_button.id)
                                     .primary()
-                                    .icon(IconName::Plus)
+                                    .icon(header_model.add_profile_button.icon())
                                     .label(header_model.add_profile_button.label)
                                     .disabled(header_model.add_profile_button.is_disabled)
                                     .on_click(cx.listener(|this, _, window, cx| {
@@ -284,7 +295,7 @@ impl WindowHopView {
                             .child(
                                 Badge::new()
                                     .with_variant(TagVariant::Secondary)
-                                    .child(stats.summary_label()),
+                                    .child(format!("{}", profiles.len())),
                             ),
                     )
                     .when(show_search, |this| {
