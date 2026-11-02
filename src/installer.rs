@@ -319,19 +319,6 @@ pub struct UninstallReceipt {
 pub(crate) const INSTALL_GUIDE_CONTENT: &str = include_str!("../docs/INSTALL-GUIDE.txt");
 
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-#[cfg(windows)]
-fn new_silent_powershell_cmd() -> std::process::Command {
-    let mut cmd = std::process::Command::new("powershell.exe");
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    cmd
-}
-
-#[cfg(windows)]
 fn create_windows_shortcut(
     shortcut_path: &Path,
     target_exe: &Path,
@@ -358,73 +345,30 @@ fn register_windows_uninstaller(
     let version = APPLICATION_VERSION;
     let install_dir_str = install_dir.to_string_lossy();
 
-    let dir_escaped = install_dir_str.replace('\'', "''");
-    let icon_escaped = display_icon.replace('\'', "''");
-    let cmd_escaped = uninstall_cmd.replace('\'', "''");
-    let qcmd_escaped = quiet_cmd.replace('\'', "''");
-    let ver_escaped = version.replace('\'', "''");
+    let entry = crate::platform::windows::WindowsUninstallOptions {
+        display_name: "Window Hop",
+        display_version: version,
+        publisher: "Window Hop Contributors",
+        install_location: &install_dir_str,
+        display_icon: &display_icon,
+        uninstall_string: &uninstall_cmd,
+        quiet_uninstall_string: &quiet_cmd,
+    };
 
-    let ps_script = format!(
-        r#"$regPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\WindowHop';
-if (-not (Test-Path $regPath)) {{ New-Item -Path $regPath -Force | Out-Null }};
-Set-ItemProperty -Path $regPath -Name 'DisplayName' -Value 'Window Hop';
-Set-ItemProperty -Path $regPath -Name 'DisplayVersion' -Value '{ver_escaped}';
-Set-ItemProperty -Path $regPath -Name 'Publisher' -Value 'Window Hop Contributors';
-Set-ItemProperty -Path $regPath -Name 'InstallLocation' -Value '{dir_escaped}';
-Set-ItemProperty -Path $regPath -Name 'DisplayIcon' -Value '{icon_escaped}';
-Set-ItemProperty -Path $regPath -Name 'UninstallString' -Value '{cmd_escaped}';
-Set-ItemProperty -Path $regPath -Name 'QuietUninstallString' -Value '{qcmd_escaped}';
-Set-ItemProperty -Path $regPath -Name 'NoModify' -Value 1 -Type DWord;
-Set-ItemProperty -Path $regPath -Name 'NoRepair' -Value 1 -Type DWord;"#
-    );
-
-    let output = new_silent_powershell_cmd()
-        .arg("-NoProfile")
-        .arg("-NonInteractive")
-        .arg("-Command")
-        .arg(&ps_script)
-        .output()
-        .map_err(|e| InstallError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(InstallError::VerificationFailed(format!(
-            "Gagal mendaftarkan uninstaller Windows: {}",
-            stderr.trim()
-        )));
-    }
-
-    Ok(())
+    crate::platform::windows::register_windows_uninstaller(&entry)
+        .map_err(|e| InstallError::VerificationFailed(e.to_string()))
 }
 
 #[cfg(windows)]
 fn unregister_windows_uninstaller() -> Result<(), InstallError> {
-    let ps_script = r#"& {
-        $regPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\WindowHop'
-        if (Test-Path $regPath) { Remove-Item -Path $regPath -Recurse -Force -ErrorAction SilentlyContinue }
-    }"#;
-    let _ = new_silent_powershell_cmd()
-        .arg("-NoProfile")
-        .arg("-NonInteractive")
-        .arg("-Command")
-        .arg(ps_script)
-        .output();
-    Ok(())
+    crate::platform::windows::unregister_windows_uninstaller()
+        .map_err(|e| InstallError::VerificationFailed(e.to_string()))
 }
 
 #[cfg(windows)]
 fn unregister_windows_startup() -> Result<(), InstallError> {
-    let ps_script = r#"& {
-        $regPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-        Remove-ItemProperty -Path $regPath -Name 'WindowHop' -ErrorAction SilentlyContinue
-    }"#;
-    let _ = new_silent_powershell_cmd()
-        .arg("-NoProfile")
-        .arg("-NonInteractive")
-        .arg("-Command")
-        .arg(ps_script)
-        .output();
-    Ok(())
+    crate::platform::windows::remove_windows_startup_registration()
+        .map_err(|e| InstallError::VerificationFailed(e.to_string()))
 }
 
 /// Menjalankan instalasi aplikasi Window Hop ke lokasi yang konsisten.

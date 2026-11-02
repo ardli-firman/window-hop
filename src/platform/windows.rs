@@ -868,6 +868,252 @@ impl Drop for WindowsTrayProvider {
     }
 }
 
+struct RegKey(windows::Win32::System::Registry::HKEY);
+
+impl Drop for RegKey {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() {
+            unsafe {
+                let _ = windows::Win32::System::Registry::RegCloseKey(self.0);
+            }
+        }
+    }
+}
+
+fn to_wide(s: &str) -> Vec<u16> {
+    let mut v: Vec<u16> = s.encode_utf16().collect();
+    v.push(0);
+    v
+}
+
+/// Memeriksa apakah aplikasi terdaftar di registry startup Windows Run key.
+pub fn is_windows_startup_registered() -> Result<bool, PlatformError> {
+    use windows::core::w;
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
+    use windows::Win32::System::Registry::{
+        RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE,
+    };
+
+    let mut hkey = HKEY::default();
+    let res = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Run"),
+            None,
+            KEY_QUERY_VALUE,
+            &mut hkey,
+        )
+    };
+    if res == ERROR_FILE_NOT_FOUND {
+        return Ok(false);
+    }
+    if res != ERROR_SUCCESS {
+        return Err(PlatformError::Os(format!(
+            "Gagal membuka registry startup key: {}",
+            res.0
+        )));
+    }
+    let _guard = RegKey(hkey);
+
+    let query_res = unsafe { RegQueryValueExW(hkey, w!("WindowHop"), None, None, None, None) };
+    if query_res == ERROR_SUCCESS {
+        Ok(true)
+    } else if query_res == ERROR_FILE_NOT_FOUND {
+        Ok(false)
+    } else {
+        Err(PlatformError::Os(format!(
+            "Gagal membaca nilai registry startup WindowHop: {}",
+            query_res.0
+        )))
+    }
+}
+
+/// Mendaftarkan executable aplikasi ke registry startup Windows Run key secara native.
+pub fn register_windows_startup(app_exe: &std::path::Path) -> Result<(), PlatformError> {
+    use windows::core::w;
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{
+        RegCreateKeyW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, REG_SZ,
+    };
+
+    let val = format!("\"{}\" --startup", app_exe.to_string_lossy());
+    let val_w = to_wide(&val);
+    let bytes = unsafe { std::slice::from_raw_parts(val_w.as_ptr() as *const u8, val_w.len() * 2) };
+
+    let mut hkey = HKEY::default();
+    let res = unsafe {
+        RegCreateKeyW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Run"),
+            &mut hkey,
+        )
+    };
+    if res != ERROR_SUCCESS {
+        return Err(PlatformError::Os(format!(
+            "Gagal membuat atau membuka registry startup key: {}",
+            res.0
+        )));
+    }
+    let _guard = RegKey(hkey);
+
+    let set_res = unsafe { RegSetValueExW(hkey, w!("WindowHop"), None, REG_SZ, Some(bytes)) };
+    if set_res != ERROR_SUCCESS {
+        return Err(PlatformError::Os(format!(
+            "Gagal menulis nilai registry startup WindowHop: {}",
+            set_res.0
+        )));
+    }
+    Ok(())
+}
+
+/// Menghapus pendaftaran aplikasi dari registry startup Windows Run key secara native.
+pub fn remove_windows_startup_registration() -> Result<(), PlatformError> {
+    use windows::core::w;
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
+    use windows::Win32::System::Registry::{
+        RegDeleteValueW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE,
+    };
+
+    let mut hkey = HKEY::default();
+    let res = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Run"),
+            None,
+            KEY_SET_VALUE,
+            &mut hkey,
+        )
+    };
+    if res == ERROR_FILE_NOT_FOUND {
+        return Ok(());
+    }
+    if res != ERROR_SUCCESS {
+        return Err(PlatformError::Os(format!(
+            "Gagal membuka registry startup key: {}",
+            res.0
+        )));
+    }
+    let _guard = RegKey(hkey);
+
+    let del_res = unsafe { RegDeleteValueW(hkey, w!("WindowHop")) };
+    if del_res != ERROR_SUCCESS && del_res != ERROR_FILE_NOT_FOUND {
+        return Err(PlatformError::Os(format!(
+            "Gagal menghapus nilai registry startup WindowHop: {}",
+            del_res.0
+        )));
+    }
+    Ok(())
+}
+
+/// Metadata uninstaller aplikasi Window Hop untuk registrasi Add/Remove Programs Windows.
+pub struct WindowsUninstallOptions<'a> {
+    pub display_name: &'a str,
+    pub display_version: &'a str,
+    pub publisher: &'a str,
+    pub install_location: &'a str,
+    pub display_icon: &'a str,
+    pub uninstall_string: &'a str,
+    pub quiet_uninstall_string: &'a str,
+}
+
+/// Mendaftarkan entri uninstaller Window Hop ke Add/Remove Programs secara native menggunakan Win32 Registry API.
+pub fn register_windows_uninstaller(opts: &WindowsUninstallOptions) -> Result<(), PlatformError> {
+    use windows::core::w;
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{
+        RegCreateKeyW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, REG_DWORD, REG_SZ,
+    };
+
+    let mut hkey = HKEY::default();
+    let res = unsafe {
+        RegCreateKeyW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\WindowHop"),
+            &mut hkey,
+        )
+    };
+    if res != ERROR_SUCCESS {
+        return Err(PlatformError::Os(format!(
+            "Gagal membuat atau membuka registry uninstall key: {}",
+            res.0
+        )));
+    }
+    let _guard = RegKey(hkey);
+
+    let set_sz =
+        |name_w: windows::core::PCWSTR, val: &str, field_name: &str| -> Result<(), PlatformError> {
+            let val_w = to_wide(val);
+            let bytes =
+                unsafe { std::slice::from_raw_parts(val_w.as_ptr() as *const u8, val_w.len() * 2) };
+            let res = unsafe { RegSetValueExW(hkey, name_w, None, REG_SZ, Some(bytes)) };
+            if res != ERROR_SUCCESS {
+                return Err(PlatformError::Os(format!(
+                    "Gagal menulis properti registry uninstaller {}: {}",
+                    field_name, res.0
+                )));
+            }
+            Ok(())
+        };
+
+    let set_dword =
+        |name_w: windows::core::PCWSTR, val: u32, field_name: &str| -> Result<(), PlatformError> {
+            let bytes = val.to_ne_bytes();
+            let res = unsafe { RegSetValueExW(hkey, name_w, None, REG_DWORD, Some(&bytes)) };
+            if res != ERROR_SUCCESS {
+                return Err(PlatformError::Os(format!(
+                    "Gagal menulis properti DWORD registry uninstaller {}: {}",
+                    field_name, res.0
+                )));
+            }
+            Ok(())
+        };
+
+    set_sz(w!("DisplayName"), opts.display_name, "DisplayName")?;
+    set_sz(w!("DisplayVersion"), opts.display_version, "DisplayVersion")?;
+    set_sz(w!("Publisher"), opts.publisher, "Publisher")?;
+    set_sz(
+        w!("InstallLocation"),
+        opts.install_location,
+        "InstallLocation",
+    )?;
+    set_sz(w!("DisplayIcon"), opts.display_icon, "DisplayIcon")?;
+    set_sz(
+        w!("UninstallString"),
+        opts.uninstall_string,
+        "UninstallString",
+    )?;
+    set_sz(
+        w!("QuietUninstallString"),
+        opts.quiet_uninstall_string,
+        "QuietUninstallString",
+    )?;
+    set_dword(w!("NoModify"), 1, "NoModify")?;
+    set_dword(w!("NoRepair"), 1, "NoRepair")?;
+
+    Ok(())
+}
+
+/// Menghapus entri uninstaller Window Hop dari Add/Remove Programs secara native menggunakan Win32 Registry API.
+pub fn unregister_windows_uninstaller() -> Result<(), PlatformError> {
+    use windows::core::w;
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
+    use windows::Win32::System::Registry::{RegDeleteTreeW, HKEY_CURRENT_USER};
+
+    let res = unsafe {
+        RegDeleteTreeW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\WindowHop"),
+        )
+    };
+    if res != ERROR_SUCCESS && res != ERROR_FILE_NOT_FOUND {
+        return Err(PlatformError::Os(format!(
+            "Gagal menghapus registry uninstaller WindowHop: {}",
+            res.0
+        )));
+    }
+    Ok(())
+}
+
 /// Implementasi StartupManager untuk platform Windows menggunakan registry Run key.
 pub struct WindowsStartupManager {
     app_exe: std::sync::Mutex<Option<std::path::PathBuf>>,
@@ -901,23 +1147,7 @@ impl StartupManager for WindowsStartupManager {
     }
 
     fn is_startup_registered(&self) -> Result<bool, PlatformError> {
-        let ps_script = r#"& { param($name) $p = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $name -ErrorAction SilentlyContinue; if ($p -and $p.$name) { exit 0 } else { exit 1 } }"#;
-
-        let output = new_silent_powershell_cmd()
-            .arg("-NoProfile")
-            .arg("-NonInteractive")
-            .arg("-Command")
-            .arg(ps_script)
-            .arg("WindowHop")
-            .output()
-            .map_err(|e| {
-                PlatformError::Os(format!(
-                    "Gagal memeriksa status pendaftaran startup Windows: {}",
-                    e
-                ))
-            })?;
-
-        Ok(output.status.success())
+        is_windows_startup_registered()
     }
 
     fn set_startup_registered(&self, enabled: bool) -> Result<(), PlatformError> {
@@ -935,53 +1165,10 @@ impl StartupManager for WindowsStartupManager {
                     })?
                 }
             };
-            let val = format!("\"{}\" --startup", app_exe.to_string_lossy());
-
-            let ps_script = r#"& { param($name, $val) Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $name -Value $val }"#;
-
-            let output = new_silent_powershell_cmd()
-                .arg("-NoProfile")
-                .arg("-NonInteractive")
-                .arg("-Command")
-                .arg(ps_script)
-                .arg("WindowHop")
-                .arg(&val)
-                .output()
-                .map_err(|e| {
-                    PlatformError::Os(format!("Gagal mendaftarkan startup Windows: {}", e))
-                })?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(PlatformError::Os(format!(
-                    "Gagal mengatur registry startup Windows: {}",
-                    stderr.trim()
-                )));
-            }
+            register_windows_startup(&app_exe)
         } else {
-            let ps_script = r#"& { param($name) Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $name -ErrorAction SilentlyContinue }"#;
-
-            let output = new_silent_powershell_cmd()
-                .arg("-NoProfile")
-                .arg("-NonInteractive")
-                .arg("-Command")
-                .arg(ps_script)
-                .arg("WindowHop")
-                .output()
-                .map_err(|e| {
-                    PlatformError::Os(format!("Gagal mencabut pendaftaran startup Windows: {}", e))
-                })?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(PlatformError::Os(format!(
-                    "Gagal menghapus registry startup Windows: {}",
-                    stderr.trim()
-                )));
-            }
+            remove_windows_startup_registration()
         }
-
-        Ok(())
     }
 }
 

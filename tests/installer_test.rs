@@ -465,3 +465,54 @@ fn test_shortcut_creation_source_code_does_not_contain_powershell() {
         "installer.rs should not use PowerShell WScript.Shell CreateShortcut"
     );
 }
+
+#[test]
+fn test_registry_operations_source_code_does_not_contain_powershell() {
+    let platform_windows = include_str!("../src/platform/windows.rs");
+    let installer = include_str!("../src/installer.rs");
+
+    // Startup manager must not use PowerShell
+    let startup_mgr_section = platform_windows
+        .split("impl StartupManager for WindowsStartupManager")
+        .nth(1)
+        .expect("WindowsStartupManager implementation must exist");
+    let startup_mgr_body = startup_mgr_section
+        .split("pub struct WindowsBrowserDetector")
+        .next()
+        .expect("Section before WindowsBrowserDetector must exist");
+
+    assert!(
+        !startup_mgr_body.contains("powershell"),
+        "WindowsStartupManager should not use powershell"
+    );
+    assert!(
+        !startup_mgr_body.contains("Get-ItemProperty"),
+        "WindowsStartupManager should not use PowerShell Get-ItemProperty"
+    );
+    assert!(
+        !startup_mgr_body.contains("Set-ItemProperty"),
+        "WindowsStartupManager should not use PowerShell Set-ItemProperty"
+    );
+    assert!(
+        !startup_mgr_body.contains("Remove-ItemProperty"),
+        "WindowsStartupManager should not use PowerShell Remove-ItemProperty"
+    );
+
+    // Installer must not use PowerShell for registry uninstaller / startup
+    assert!(
+        !installer.contains("powershell"),
+        "installer.rs should not contain any powershell invocation"
+    );
+    assert!(
+        !installer.contains("Set-ItemProperty"),
+        "installer.rs should not use PowerShell Set-ItemProperty"
+    );
+    assert!(
+        !installer.contains("Remove-ItemProperty"),
+        "installer.rs should not use PowerShell Remove-ItemProperty"
+    );
+    assert!(
+        !installer.contains("HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion"),
+        "installer.rs should not use PowerShell HKCU registry paths"
+    );
+}
