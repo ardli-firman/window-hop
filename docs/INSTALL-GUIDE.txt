@@ -1,0 +1,48 @@
+================================================================================
+                    WINDOW HOP - PANDUAN PEMASANGAN
+================================================================================
+
+Window Hop adalah aplikasi pemilih profil browser poliklinik untuk workstation
+Windows dengan konfigurasi monitor ganda (multi-monitor).
+
+--------------------------------------------------------------------------------
+1. CARA PEMASANGAN (INSTALL)
+--------------------------------------------------------------------------------
+Pilih salah satu metode berikut:
+
+A. Wizard Setup Standar (Direkomendasikan)
+   - Klik ganda berkas "WindowHop-Setup.exe".
+   - Ikuti petunjuk wizard hingga selesai.
+   - Lokasi pemasangan default:
+     %LOCALAPPDATA%\Programs\Window Hop
+   - Shortcut aplikasi otomatis dibuat di Desktop dan Start Menu.
+
+B. Installer Mandiri (Sekali Klik)
+   - Klik ganda berkas "window-hop-installer.exe".
+   - Klik tombol "Yes" pada dialog konfirmasi untuk memasang.
+   - Aplikasi langsung terpasang dan siap digunakan.
+
+C. Versi Portable (Tanpa Instalasi)
+   - Ekstrak seluruh isi arsip "window-hop-v*-portable.zip" ke folder Anda.
+   - Jalankan berkas "window-hop.exe" secara langsung.
+
+--------------------------------------------------------------------------------
+2. CARA MENGHAPUS (UNINSTALL)
+--------------------------------------------------------------------------------
+Untuk mencopot aplikasi Window Hop secara bersih:
+- Buka menu Windows Settings > Apps > Installed apps (atau Control Panel).
+- Cari "Window Hop", lalu klik "Uninstall".
+Atau:
+- Jalankan berkas "uninstall.exe" di folder instalasi atau melalui shortcut
+  "Uninstall Window Hop" pada Start Menu.
+
+--------------------------------------------------------------------------------
+3. PERSYARATAN SISTEM
+--------------------------------------------------------------------------------
+- Sistem Operasi : Windows 10 64-bit (Build 19041 atau lebih baru) / Windows 11
+- Arsitektur OS  : x64 (64-bit). Sistem operasi 32-bit tidak didukung.
+- Hak Akses      : Pengguna standar (tidak memerlukan hak Administrator / UAC).
+- Grafis / GPUI  : Direct3D 11 (Feature Level 11_0+) / DirectX 12.
+- Browser        : Microsoft Edge, Google Chrome, Mozilla Firefox, Brave.
+
+================================================================================

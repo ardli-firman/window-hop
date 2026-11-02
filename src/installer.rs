@@ -316,33 +316,7 @@ pub struct UninstallReceipt {
 }
 
 /// Petunjuk pemasangan dan batas baseline OS/runtime yang diverifikasi.
-pub(crate) const INSTALL_GUIDE_CONTENT: &str = r#"================================================================================
-Window Hop - Petunjuk Pemasangan dan Batasan Sistem Terverifikasi
-================================================================================
-
-1. LINGKUNGAN SISTEM OPERASI TERVERIFIKASI
-- Target OS: Windows 10 64-bit (Build 19041 / Version 2004 atau lebih baru) dan Windows 11 64-bit.
-- Arsitektur OS: x64 (64-bit). OS 32-bit (x86) tidak didukung (ADR 0002).
-- Hak akses: Instalasi per-pengguna (%LOCALAPPDATA%\Programs\Window Hop) tidak memerlukan hak administrator (UAC).
-
-2. PERSYARATAN RUNTIME GPUI & GRAFIS
-- Driver grafis dengan dukungan DirectX 11 / Direct3D 11 Feature Level 11_0 atau lebih baru.
-- Layanan font sistem DirectWrite Windows aktif.
-- Visual C++ Redistributable 2015-2022 x64 (biasanya sudah tersedia di Windows 10/11).
-- Resource/asset UI dan font disertakan langsung (ter-embed via rust-embed) di dalam window-hop.exe.
-
-3. BROWSER TERVERIFIKASI
-Window Hop mendukung browser poliklinik 32-bit maupun 64-bit pada OS 64-bit:
-- Microsoft Edge (Chromium)
-- Google Chrome
-- Mozilla Firefox
-- Brave Browser
-Setiap profil menjalankan sesi browser terisolasi (--user-data-dir atau -profile) tanpa mengganggu browser kerja perawat.
-
-4. SHORTCUT & STARTUP
-- Shortcut profil dibuat melalui UI Window Hop dan menunjuk ke direktori instalasi aplikasi resmi, bukan direktori build.
-- Opsi startup otomatis mendaftarkan aplikasi di HKCU:\Software\Microsoft\Windows\CurrentVersion\Run dengan flag --startup.
-"#;
+pub(crate) const INSTALL_GUIDE_CONTENT: &str = include_str!("../docs/INSTALL-GUIDE.txt");
 
 #[cfg(windows)]
 fn create_windows_shortcut(
