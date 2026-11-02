@@ -4,7 +4,8 @@ use window_hop::application::LifecycleCoordinator;
 use window_hop::domain::DraftProfileInput;
 use window_hop::installer::{
     default_install_dir, install, is_dev_build_path, resolve_installed_app_executable, uninstall,
-    validate_os_baseline, verify_installation, Arch, InstallError, InstallOptions, OsVersion,
+    validate_os_baseline, verify_installation, Arch, InstallError, InstallManifest, InstallOptions,
+    OsVersion,
 };
 use window_hop::persistence::FileProfileStore;
 use window_hop::platform::{MockShortcutCreator, MockStartupManager};
@@ -433,4 +434,19 @@ fn test_manifest_with_forward_slashes_and_shortcuts_parses_cleanly() {
     assert_eq!(receipt.version, "0.1.2");
     assert_eq!(receipt.shortcuts_created.len(), 3);
     assert_eq!(receipt.installed_files.len(), 4);
+}
+
+#[test]
+fn test_manifest_deserialization_with_omitted_installed_at_uses_default() {
+    let manifest_json = r#"{
+  "app_name": "Window Hop",
+  "version": "0.1.2",
+  "installed_exe": "C:/Programs/Window Hop/window-hop.exe",
+  "installed_files": ["C:/Programs/Window Hop/window-hop.exe"]
+}"#;
+    let manifest: InstallManifest = serde_json::from_str(manifest_json).unwrap();
+    assert_eq!(manifest.app_name, "Window Hop");
+    assert!(!manifest.installed_at.is_empty());
+    assert!(manifest.installed_at.ends_with('Z'));
+    assert!(manifest.shortcuts_created.is_empty());
 }

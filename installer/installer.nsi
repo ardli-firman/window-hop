@@ -14,6 +14,10 @@
   !define VERSION "0.1.2"
 !endif
 
+!ifndef TIMESTAMP
+  !define TIMESTAMP "2026-11-02T00:00:00Z"
+!endif
+
 !ifndef OUTFILE
   !define OUTFILE "..\dist\WindowHop-Setup.exe"
 !endif
@@ -107,7 +111,7 @@ Section "Install"
     FileWrite $0 '    "$R0/install-manifest.json",${\r}${\n}'
     FileWrite $0 '    "$R0/uninstall.exe"${\r}${\n}'
     FileWrite $0 '  ],${\r}${\n}'
-    FileWrite $0 '  "installed_at": "2026-11-02T00:00:00Z",${\r}${\n}'
+    FileWrite $0 '  "installed_at": "${TIMESTAMP}",${\r}${\n}'
     FileWrite $0 '  "shortcuts_created": [${\r}${\n}'
     FileWrite $0 '    "$R1/Window Hop.lnk",${\r}${\n}'
     FileWrite $0 '    "$R1/Uninstall Window Hop.lnk",${\r}${\n}'

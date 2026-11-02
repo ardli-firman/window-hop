@@ -301,6 +301,7 @@ pub struct InstallManifest {
     pub version: String,
     pub installed_exe: PathBuf,
     pub installed_files: Vec<PathBuf>,
+    #[serde(default = "current_timestamp_iso8601")]
     pub installed_at: String,
     #[serde(default)]
     pub shortcuts_created: Vec<PathBuf>,
