@@ -1,9 +1,11 @@
 //! Integration and contract tests for the modular Window Hop UI architecture.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use gpui_kit::component::tag::TagVariant;
 use gpui_kit::px;
+use window_hop::application::LifecycleCoordinator;
 use window_hop::browsers::{
     BrowserArchitecture, BrowserCompatibilityStatus, BrowserSupportEvidence, DetectedBrowser,
 };
@@ -11,6 +13,8 @@ use window_hop::domain::{
     ExitReason, MonitorDescriptor, MonitorIdentity, ProcessId, Profile, ProfileId,
     ProfileLifecycleState, ProfileStatus, TargetMonitorStatus,
 };
+use window_hop::persistence::MemoryProfileStore;
+use window_hop::platform::MockStartupManager;
 use window_hop::ui::dashboard::{DashboardStats, ProfileCardModel, DASHBOARD_GRID_COLUMNS};
 use window_hop::ui::sidebar::{
     filter_profiles_by_query, profile_has_unsaved_changes, should_show_profile_search,
@@ -23,8 +27,9 @@ use window_hop::ui::tokens::{
 };
 use window_hop::ui::{
     find_occupying_profile, validate_wizard_step, ActionBarModel, ActionKind,
-    BrowserCompatibilityBadge, BrowserQuickTileModel, DeleteConfirmationModalModel,
-    MonitorCardModel, ProfileWizardStep, ShortcutOptionsModel, StartupCardModel, WindowHopView,
+    BrowserCompatibilityBadge, BrowserQuickTileModel, DashboardHeaderModel,
+    DeleteConfirmationModalModel, HeaderActionKind, MonitorCardModel, ProfileWizardStep,
+    SettingsModalModel, ShortcutOptionsModel, StartupCardModel, WindowHopView,
     WizardValidationError, DISCONNECTED_BADGE, DISCONNECTED_WARNING, MONITOR_POLL_INTERVAL,
     NURSE_PRIMARY_BADGE, NURSE_PRIMARY_WARNING, RECOMMENDED_QUEUE_BADGE, WIZARD_STEP_COUNT,
 };
@@ -1250,4 +1255,76 @@ fn test_wizard_validation_error_is_structured() {
     };
     assert_eq!(error.step.index(), 1);
     assert!(error.message.starts_with("URL"));
+}
+
+#[test]
+fn test_settings_modal_and_dashboard_header_startup_migration() {
+    // 1. Header dashboard has settings button with gear icon next to add profile button
+    let header = DashboardHeaderModel::evaluate(false);
+    assert_eq!(header.settings_button.kind, HeaderActionKind::Settings);
+    assert_eq!(header.settings_button.id, "btn-open-settings");
+    assert_eq!(header.settings_button.label, "Pengaturan");
+    assert!(!header.settings_button.is_disabled);
+
+    assert_eq!(header.add_profile_button.kind, HeaderActionKind::AddProfile);
+    assert_eq!(header.add_profile_button.id, "btn-add-profile");
+    assert_eq!(header.add_profile_button.label, "+ Profil Baru");
+    assert!(!header.add_profile_button.is_disabled);
+
+    // When busy, both buttons are disabled
+    let header_busy = DashboardHeaderModel::evaluate(true);
+    assert!(header_busy.settings_button.is_disabled);
+    assert!(header_busy.add_profile_button.is_disabled);
+
+    // 2. Settings Modal Model evaluates active startup state with selected profile
+    let modal_active = SettingsModalModel::evaluate(true, Some("Poli Rawat Jalan"));
+    assert_eq!(modal_active.title, "Pengaturan Aplikasi");
+    assert!(modal_active.description.contains("preferensi"));
+    assert_eq!(
+        modal_active.startup_switch_label,
+        "Mulai otomatis saat login Windows"
+    );
+    assert!(modal_active.startup_enabled);
+    assert!(modal_active.startup_description.contains("latar belakang"));
+    assert_eq!(
+        modal_active.startup_status_text,
+        "Aktif · Profil startup: Poli Rawat Jalan"
+    );
+    assert_eq!(modal_active.close_button_label, "Tutup");
+
+    // 3. Settings Modal Model evaluates disabled startup state
+    let modal_disabled = SettingsModalModel::evaluate(false, Some("Poli Rawat Jalan"));
+    assert!(!modal_disabled.startup_enabled);
+    assert!(modal_disabled
+        .startup_description
+        .contains("tidak akan dijalankan"));
+    assert_eq!(
+        modal_disabled.startup_status_text,
+        "Nonaktif · Aktifkan agar antrian siap setelah login"
+    );
+
+    // 4. Settings Modal Model evaluates active startup state without assigned profile
+    let modal_unassigned = SettingsModalModel::evaluate(true, None);
+    assert!(modal_unassigned.startup_enabled);
+    assert_eq!(
+        modal_unassigned.startup_status_text,
+        "Aktif · Belum ada profil startup yang dipilih"
+    );
+
+    // 5. Verification of pure lifecycle state in application coordinator for startup preferences
+    let store = Arc::new(MemoryProfileStore::new());
+    let mut coordinator = LifecycleCoordinator::from_store(store);
+    let startup_manager = Arc::new(MockStartupManager::new(false));
+    coordinator.set_startup_manager(startup_manager.clone());
+
+    assert!(!coordinator.startup_enabled());
+
+    // Toggling startup updates coordinator preference and OS registration
+    coordinator.set_startup_enabled(true).unwrap();
+    assert!(coordinator.startup_enabled());
+    assert!(startup_manager.is_registered());
+
+    coordinator.set_startup_enabled(false).unwrap();
+    assert!(!coordinator.startup_enabled());
+    assert!(!startup_manager.is_registered());
 }
