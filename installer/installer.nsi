@@ -101,23 +101,23 @@ Section "Install"
     Pop $R2
 
     FileOpen $0 "$INSTDIR\install-manifest.json" w
-    FileWrite $0 "{${\r}${\n}"
-    FileWrite $0 '  "app_name": "Window Hop",${\r}${\n}'
-    FileWrite $0 '  "version": "${VERSION}",${\r}${\n}'
-    FileWrite $0 '  "installed_exe": "$R0/window-hop.exe",${\r}${\n}'
-    FileWrite $0 '  "installed_files": [${\r}${\n}'
-    FileWrite $0 '    "$R0/window-hop.exe",${\r}${\n}'
-    FileWrite $0 '    "$R0/INSTALL-GUIDE.txt",${\r}${\n}'
-    FileWrite $0 '    "$R0/install-manifest.json",${\r}${\n}'
-    FileWrite $0 '    "$R0/uninstall.exe"${\r}${\n}'
-    FileWrite $0 '  ],${\r}${\n}'
-    FileWrite $0 '  "installed_at": "${TIMESTAMP}",${\r}${\n}'
-    FileWrite $0 '  "shortcuts_created": [${\r}${\n}'
-    FileWrite $0 '    "$R1/Window Hop.lnk",${\r}${\n}'
-    FileWrite $0 '    "$R1/Uninstall Window Hop.lnk",${\r}${\n}'
-    FileWrite $0 '    "$R2/Window Hop.lnk"${\r}${\n}'
-    FileWrite $0 '  ]${\r}${\n}'
-    FileWrite $0 "}${\r}${\n}"
+    FileWrite $0 "{$\r$\n"
+    FileWrite $0 '  "app_name": "Window Hop",$\r$\n'
+    FileWrite $0 '  "version": "${VERSION}",$\r$\n'
+    FileWrite $0 '  "installed_exe": "$R0/window-hop.exe",$\r$\n'
+    FileWrite $0 '  "installed_files": [$\r$\n'
+    FileWrite $0 '    "$R0/window-hop.exe",$\r$\n'
+    FileWrite $0 '    "$R0/INSTALL-GUIDE.txt",$\r$\n'
+    FileWrite $0 '    "$R0/install-manifest.json",$\r$\n'
+    FileWrite $0 '    "$R0/uninstall.exe"$\r$\n'
+    FileWrite $0 '  ],$\r$\n'
+    FileWrite $0 '  "installed_at": "${TIMESTAMP}",$\r$\n'
+    FileWrite $0 '  "shortcuts_created": [$\r$\n'
+    FileWrite $0 '    "$R1/Window Hop.lnk",$\r$\n'
+    FileWrite $0 '    "$R1/Uninstall Window Hop.lnk",$\r$\n'
+    FileWrite $0 '    "$R2/Window Hop.lnk"$\r$\n'
+    FileWrite $0 '  ]$\r$\n'
+    FileWrite $0 "}$\r$\n"
     FileClose $0
 
     ; 5. Buat Shortcut pada Start Menu
