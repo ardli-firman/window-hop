@@ -254,14 +254,16 @@ version:
 version-full: $(VERSION_TOOL)
 	@$(VERSION_TOOL) full
 
-define do_bump
-	@if ! git diff --quiet Cargo.toml Cargo.lock; then \
-		echo "Error: Cargo.toml or Cargo.lock has uncommitted changes. Please commit or discard them before bumping."; \
+define check_clean_version_files
+	@if ! git diff --quiet HEAD -- Cargo.toml Cargo.lock; then \
+		echo "Error: Cargo.toml or Cargo.lock has uncommitted changes (staged or unstaged). Please commit or discard them before changing version."; \
 		exit 1; \
 	fi
-	@echo "==> Bumping $(1) version via version-tool..."
-	@$(VERSION_TOOL) bump $(1)
-	@NEW_VER=$$($(VERSION_TOOL) get); \
+endef
+
+define commit_and_push_version
+	@set -e; \
+	NEW_VER=$$($(VERSION_TOOL) get); \
 	CURRENT_BRANCH=$$(git rev-parse --abbrev-ref HEAD); \
 	echo "==> Staging Cargo.toml and Cargo.lock for v$$NEW_VER..."; \
 	git add Cargo.toml Cargo.lock; \
@@ -285,44 +287,24 @@ define do_bump
 			git push origin HEAD; \
 		fi; \
 	fi; \
-	echo "==> Version v$$NEW_VER successfully bumped, committed, and pushed!"
+	echo "==> Version v$$NEW_VER successfully $(1), committed, and pushed!"
+endef
+
+define do_bump
+	$(call check_clean_version_files)
+	@echo "==> Bumping $(1) version via version-tool..."
+	@$(VERSION_TOOL) bump $(1)
+	$(call commit_and_push_version,bumped)
 endef
 
 set-version: $(VERSION_TOOL)
 ifndef VERSION
 	$(error VERSION is not set. Usage: make set-version VERSION=x.y.z)
 endif
-	@if ! git diff --quiet Cargo.toml Cargo.lock; then \
-		echo "Error: Cargo.toml or Cargo.lock has uncommitted changes. Please commit or discard them before setting version."; \
-		exit 1; \
-	fi
+	$(call check_clean_version_files)
 	@echo "==> Setting version to $(VERSION)..."
 	@$(VERSION_TOOL) set $(VERSION)
-	@NEW_VER=$$($(VERSION_TOOL) get); \
-	CURRENT_BRANCH=$$(git rev-parse --abbrev-ref HEAD); \
-	echo "==> Staging Cargo.toml and Cargo.lock for v$$NEW_VER..."; \
-	git add Cargo.toml Cargo.lock; \
-	echo "==> Creating conventional commit: chore: bump $$NEW_VER..."; \
-	git commit --only Cargo.toml Cargo.lock -m "chore: bump $$NEW_VER"; \
-	if [ -z "$(NO_TAG)" ]; then \
-		echo "==> Creating annotated tag v$$NEW_VER..."; \
-		git tag -a v$$NEW_VER -m "Release v$$NEW_VER"; \
-		echo "==> Pushing commit and tag v$$NEW_VER to origin..."; \
-		if [ "$$CURRENT_BRANCH" != "HEAD" ]; then \
-			git push origin "$$CURRENT_BRANCH"; \
-		else \
-			git push origin HEAD; \
-		fi; \
-		git push origin v$$NEW_VER; \
-	else \
-		echo "==> Pushing commit to origin (tagging skipped via NO_TAG=1)..."; \
-		if [ "$$CURRENT_BRANCH" != "HEAD" ]; then \
-			git push origin "$$CURRENT_BRANCH"; \
-		else \
-			git push origin HEAD; \
-		fi; \
-	fi; \
-	echo "==> Version v$$NEW_VER successfully set, committed, and pushed!"
+	$(call commit_and_push_version,set)
 
 bump-patch: $(VERSION_TOOL)
 	$(call do_bump,patch)
