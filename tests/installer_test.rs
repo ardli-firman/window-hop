@@ -399,3 +399,38 @@ fn test_uninstall_removes_installed_files_and_cleans_directory() {
     assert!(receipt.success);
     assert!(receipt.uninstalled_files.len() >= 3);
 }
+
+#[test]
+fn test_manifest_with_forward_slashes_and_shortcuts_parses_cleanly() {
+    let temp = tempfile::tempdir().unwrap();
+    let install_dir = temp.path().join("Window Hop");
+    fs::create_dir_all(&install_dir).unwrap();
+
+    let exe = install_dir.join("window-hop.exe");
+    fs::write(&exe, b"MZ_PE").unwrap();
+
+    let manifest_content = r#"{
+  "app_name": "Window Hop",
+  "version": "0.1.2",
+  "installed_exe": "C:/Users/Perawat/AppData/Local/Programs/Window Hop/window-hop.exe",
+  "installed_files": [
+    "C:/Users/Perawat/AppData/Local/Programs/Window Hop/window-hop.exe",
+    "C:/Users/Perawat/AppData/Local/Programs/Window Hop/INSTALL-GUIDE.txt",
+    "C:/Users/Perawat/AppData/Local/Programs/Window Hop/install-manifest.json",
+    "C:/Users/Perawat/AppData/Local/Programs/Window Hop/uninstall.exe"
+  ],
+  "installed_at": "2026-11-02T00:00:00Z",
+  "shortcuts_created": [
+    "C:/Users/Perawat/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Window Hop/Window Hop.lnk",
+    "C:/Users/Perawat/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Window Hop/Uninstall Window Hop.lnk",
+    "C:/Users/Perawat/Desktop/Window Hop.lnk"
+  ]
+}"#;
+    fs::write(install_dir.join("install-manifest.json"), manifest_content).unwrap();
+
+    let receipt =
+        verify_installation(&install_dir).expect("Verification should succeed for JSON manifest");
+    assert_eq!(receipt.version, "0.1.2");
+    assert_eq!(receipt.shortcuts_created.len(), 3);
+    assert_eq!(receipt.installed_files.len(), 4);
+}
