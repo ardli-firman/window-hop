@@ -6,9 +6,21 @@ use crate::platform::{
     BrowserDetector, DetectedBrowser, ManagedProcess, MonitorProvider, PlatformError,
     ProcessLauncher, StartupManager, TrayAction, TrayActionHandler, TrayProvider,
 };
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+#[cfg(windows)]
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(windows)]
+pub(crate) fn new_silent_powershell_cmd() -> Command {
+    let mut cmd = Command::new("powershell.exe");
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
 use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -440,7 +452,7 @@ impl crate::platform::ShortcutCreator for WindowsShortcutCreator {
         // agar parameter posisi terikat dengan benar dan bebas dari masalah shell injection atau kutip/spasi.
         let ps_script = "& { param($lnk, $target, $arg, $dir) $ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut($lnk); $s.TargetPath = $target; $s.Arguments = $arg; $s.WorkingDirectory = $dir; $s.Save() }";
 
-        let output = std::process::Command::new("powershell.exe")
+        let output = new_silent_powershell_cmd()
             .arg("-NoProfile")
             .arg("-NonInteractive")
             .arg("-Command")
@@ -832,7 +844,7 @@ impl StartupManager for WindowsStartupManager {
     fn is_startup_registered(&self) -> Result<bool, PlatformError> {
         let ps_script = r#"& { param($name) $p = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $name -ErrorAction SilentlyContinue; if ($p -and $p.$name) { exit 0 } else { exit 1 } }"#;
 
-        let output = std::process::Command::new("powershell.exe")
+        let output = new_silent_powershell_cmd()
             .arg("-NoProfile")
             .arg("-NonInteractive")
             .arg("-Command")
@@ -868,7 +880,7 @@ impl StartupManager for WindowsStartupManager {
 
             let ps_script = r#"& { param($name, $val) Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $name -Value $val }"#;
 
-            let output = std::process::Command::new("powershell.exe")
+            let output = new_silent_powershell_cmd()
                 .arg("-NoProfile")
                 .arg("-NonInteractive")
                 .arg("-Command")
@@ -890,7 +902,7 @@ impl StartupManager for WindowsStartupManager {
         } else {
             let ps_script = r#"& { param($name) Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $name -ErrorAction SilentlyContinue }"#;
 
-            let output = std::process::Command::new("powershell.exe")
+            let output = new_silent_powershell_cmd()
                 .arg("-NoProfile")
                 .arg("-NonInteractive")
                 .arg("-Command")
@@ -1040,14 +1052,7 @@ impl BrowserDetector for WindowsBrowserDetector {
             }
         }"#;
 
-        #[cfg(windows)]
-        use std::os::windows::process::CommandExt;
-        #[cfg(windows)]
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-        let mut cmd = std::process::Command::new("powershell.exe");
-        #[cfg(windows)]
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        let mut cmd = new_silent_powershell_cmd();
 
         if let Ok(output) = cmd
             .arg("-NoProfile")

@@ -252,6 +252,35 @@ fn test_parse_silent_or_startup_flag() {
 }
 
 #[test]
+fn test_parse_open_settings_flag() {
+    use window_hop::platform::parse_open_settings_flag;
+
+    assert!(parse_open_settings_flag(vec![
+        "window-hop.exe".to_string(),
+        "--settings".to_string(),
+    ]));
+
+    assert!(parse_open_settings_flag(vec![
+        "window-hop.exe".to_string(),
+        "--open-settings".to_string(),
+    ]));
+
+    assert!(!parse_open_settings_flag(vec![
+        "window-hop.exe".to_string(),
+    ]));
+
+    assert!(!parse_open_settings_flag(vec![
+        "window-hop.exe".to_string(),
+        "--startup".to_string(),
+    ]));
+
+    assert!(!parse_open_settings_flag(vec![
+        "window-hop.exe".to_string(),
+        "--silent".to_string(),
+    ]));
+}
+
+#[test]
 fn test_mock_tray_provider_updates_status_and_triggers_actions() {
     use window_hop::domain::TrayStatusSummary;
     use window_hop::platform::{MockTrayProvider, TrayAction, TrayProvider};

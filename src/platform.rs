@@ -356,6 +356,10 @@ pub const STARTUP_FLAG: &str = "--startup";
 pub const SILENT_FLAG: &str = "--silent";
 pub const TRAY_FLAG: &str = "--tray";
 
+/// Flag argumen baris perintah untuk membuka jendela antarmuka pengaturan secara eksplisit.
+pub const SETTINGS_FLAG: &str = "--settings";
+pub const OPEN_SETTINGS_FLAG: &str = "--open-settings";
+
 /// Memeriksa apakah argumen mengandung flag mulai di tray/headless tanpa membuka pengaturan.
 pub fn parse_silent_or_startup_flag<I>(args: I) -> bool
 where
@@ -364,6 +368,16 @@ where
     let args: Vec<String> = args.into_iter().collect();
     args.iter()
         .any(|arg| arg == STARTUP_FLAG || arg == SILENT_FLAG || arg == TRAY_FLAG)
+}
+
+/// Memeriksa apakah argumen mengandung flag eksplisit untuk membuka jendela pengaturan.
+pub fn parse_open_settings_flag<I>(args: I) -> bool
+where
+    I: IntoIterator<Item = String>,
+{
+    let args: Vec<String> = args.into_iter().collect();
+    args.iter()
+        .any(|arg| arg == SETTINGS_FLAG || arg == OPEN_SETTINGS_FLAG)
 }
 
 /// Membaca flag `--activate-profile <PROFILE_ID>` dari argumen baris perintah jika ada.

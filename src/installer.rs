@@ -344,6 +344,19 @@ Setiap profil menjalankan sesi browser terisolasi (--user-data-dir atau -profile
 "#;
 
 #[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(windows)]
+fn new_silent_powershell_cmd() -> std::process::Command {
+    let mut cmd = std::process::Command::new("powershell.exe");
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
+#[cfg(windows)]
 fn create_windows_shortcut(
     shortcut_path: &Path,
     target_exe: &Path,
@@ -355,7 +368,7 @@ fn create_windows_shortcut(
     let workdir = target_exe.parent().unwrap_or(shortcut_path);
     let ps_script = "& { param($lnk, $target, $arg, $dir) $ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut($lnk); $s.TargetPath = $target; $s.Arguments = $arg; $s.WorkingDirectory = $dir; $s.Save() }";
 
-    let output = std::process::Command::new("powershell.exe")
+    let output = new_silent_powershell_cmd()
         .arg("-NoProfile")
         .arg("-NonInteractive")
         .arg("-Command")
@@ -409,7 +422,7 @@ fn register_windows_uninstaller(
         Set-ItemProperty -Path $regPath -Name 'NoRepair' -Value 1 -Type DWord
     }"#;
 
-    let output = std::process::Command::new("powershell.exe")
+    let output = new_silent_powershell_cmd()
         .arg("-NoProfile")
         .arg("-NonInteractive")
         .arg("-Command")
@@ -439,7 +452,7 @@ fn unregister_windows_uninstaller() -> Result<(), InstallError> {
         $regPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\WindowHop'
         if (Test-Path $regPath) { Remove-Item -Path $regPath -Recurse -Force -ErrorAction SilentlyContinue }
     }"#;
-    let _ = std::process::Command::new("powershell.exe")
+    let _ = new_silent_powershell_cmd()
         .arg("-NoProfile")
         .arg("-NonInteractive")
         .arg("-Command")
@@ -454,7 +467,7 @@ fn unregister_windows_startup() -> Result<(), InstallError> {
         $regPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
         Remove-ItemProperty -Path $regPath -Name 'WindowHop' -ErrorAction SilentlyContinue
     }"#;
-    let _ = std::process::Command::new("powershell.exe")
+    let _ = new_silent_powershell_cmd()
         .arg("-NoProfile")
         .arg("-NonInteractive")
         .arg("-Command")
