@@ -118,6 +118,71 @@ pub fn default_install_dir() -> PathBuf {
     PathBuf::from("Window Hop")
 }
 
+/// Mengembalikan lokasi direktori Start Menu untuk Window Hop.
+pub fn start_menu_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            return Some(
+                PathBuf::from(appdata)
+                    .join("Microsoft")
+                    .join("Windows")
+                    .join("Start Menu")
+                    .join("Programs")
+                    .join("Window Hop"),
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
+            return Some(PathBuf::from(data_home).join("applications"));
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            return Some(
+                PathBuf::from(home)
+                    .join(".local")
+                    .join("share")
+                    .join("applications"),
+            );
+        }
+    }
+
+    None
+}
+
+/// Mengembalikan lokasi direktori Desktop pengguna.
+pub fn desktop_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        if let Some(onedrive) = std::env::var_os("OneDrive") {
+            let desktop = PathBuf::from(onedrive).join("Desktop");
+            if desktop.exists() {
+                return Some(desktop);
+            }
+        }
+        if let Some(userprofile) = std::env::var_os("USERPROFILE") {
+            let desktop = PathBuf::from(userprofile).join("Desktop");
+            if desktop.exists() {
+                return Some(desktop);
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let desktop = PathBuf::from(home).join("Desktop");
+            if desktop.exists() {
+                return Some(desktop);
+            }
+        }
+    }
+
+    None
+}
+
 /// Memeriksa apakah path yang diberikan berada di dalam direktori build pengembang (e.g. target/debug atau target/release).
 pub fn is_dev_build_path(path: &Path) -> bool {
     let s = path.to_string_lossy().to_lowercase();
@@ -189,10 +254,18 @@ pub fn resolve_installed_app_executable(
 pub struct InstallOptions {
     /// Direktori tujuan instalasi (default: `default_install_dir()`).
     pub install_dir: PathBuf,
-    /// Path executable aplikasi sumber yang akan dipasang.
+    /// Path executable aplikasi sumber yang akan dipasang jika tidak menggunakan payload tersemat.
     pub source_exe: PathBuf,
+    /// Payload biner aplikasi yang tersemat langsung dalam biner installer.
+    pub embedded_payload: Option<&'static [u8]>,
     /// Apakah menyertakan dokumen panduan instalasi dan deskripsi dependensi GPUI.
     pub bundle_resources: bool,
+    /// Apakah membuat shortcut Start Menu untuk Window Hop.
+    pub create_start_menu_shortcut: bool,
+    /// Apakah membuat shortcut Desktop untuk Window Hop.
+    pub create_desktop_shortcut: bool,
+    /// Apakah mendaftarkan uninstaller ke Windows Add/Remove Programs (Apps & Features).
+    pub register_uninstaller: bool,
 }
 
 impl Default for InstallOptions {
@@ -200,7 +273,11 @@ impl Default for InstallOptions {
         Self {
             install_dir: default_install_dir(),
             source_exe: PathBuf::from("window-hop.exe"),
+            embedded_payload: None,
             bundle_resources: true,
+            create_start_menu_shortcut: false,
+            create_desktop_shortcut: false,
+            register_uninstaller: false,
         }
     }
 }
@@ -213,6 +290,8 @@ pub struct InstallReceipt {
     pub installed_files: Vec<PathBuf>,
     pub manifest_path: PathBuf,
     pub version: String,
+    #[serde(default)]
+    pub shortcuts_created: Vec<PathBuf>,
 }
 
 /// Manifest informasi berkas instalasi.
@@ -223,6 +302,16 @@ pub struct InstallManifest {
     pub installed_exe: PathBuf,
     pub installed_files: Vec<PathBuf>,
     pub installed_at: String,
+    #[serde(default)]
+    pub shortcuts_created: Vec<PathBuf>,
+}
+
+/// Tanda bukti keberhasilan pencopotan (uninstall) Window Hop.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UninstallReceipt {
+    pub uninstalled_files: Vec<PathBuf>,
+    pub cleaned_shortcuts: Vec<PathBuf>,
+    pub success: bool,
 }
 
 /// Petunjuk pemasangan dan batas baseline OS/runtime yang diverifikasi.
@@ -254,16 +343,139 @@ Setiap profil menjalankan sesi browser terisolasi (--user-data-dir atau -profile
 - Opsi startup otomatis mendaftarkan aplikasi di HKCU:\Software\Microsoft\Windows\CurrentVersion\Run dengan flag --startup.
 "#;
 
-/// Menjalankan instalasi aplikasi Window Hop ke lokasi yang konsisten.
-pub fn install(options: &InstallOptions) -> Result<InstallReceipt, InstallError> {
-    if !options.source_exe.exists() {
-        return Err(InstallError::MissingPayload(options.source_exe.clone()));
+#[cfg(windows)]
+fn create_windows_shortcut(
+    shortcut_path: &Path,
+    target_exe: &Path,
+    args: &str,
+) -> Result<(), InstallError> {
+    if let Some(parent) = shortcut_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let workdir = target_exe.parent().unwrap_or(shortcut_path);
+    let ps_script = "& { param($lnk, $target, $arg, $dir) $ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut($lnk); $s.TargetPath = $target; $s.Arguments = $arg; $s.WorkingDirectory = $dir; $s.Save() }";
+
+    let output = std::process::Command::new("powershell.exe")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg(ps_script)
+        .arg(shortcut_path.to_string_lossy().as_ref())
+        .arg(target_exe.to_string_lossy().as_ref())
+        .arg(args)
+        .arg(workdir.to_string_lossy().as_ref())
+        .output()
+        .map_err(|e| InstallError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(InstallError::VerificationFailed(format!(
+            "Gagal membuat shortcut: {}",
+            stderr.trim()
+        )));
     }
 
+    Ok(())
+}
+
+#[cfg(windows)]
+fn register_windows_uninstaller(
+    install_dir: &Path,
+    installed_exe: &Path,
+) -> Result<(), InstallError> {
+    let uninstaller_exe = install_dir.join("uninstall.exe");
+    let uninstall_cmd = if uninstaller_exe.exists() {
+        format!("\"{}\"", uninstaller_exe.to_string_lossy())
+    } else {
+        format!("\"{}\" --uninstall", installed_exe.to_string_lossy())
+    };
+    let quiet_cmd = format!("{} --silent", uninstall_cmd);
+    let display_icon = format!("\"{}\",0", installed_exe.to_string_lossy());
+    let version = APPLICATION_VERSION;
+    let install_dir_str = install_dir.to_string_lossy();
+
+    let ps_script = r#"& {
+        param($dir, $icon, $cmd, $qcmd, $ver)
+        $regPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\WindowHop'
+        if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+        Set-ItemProperty -Path $regPath -Name 'DisplayName' -Value 'Window Hop'
+        Set-ItemProperty -Path $regPath -Name 'DisplayVersion' -Value $ver
+        Set-ItemProperty -Path $regPath -Name 'Publisher' -Value 'Window Hop Contributors'
+        Set-ItemProperty -Path $regPath -Name 'InstallLocation' -Value $dir
+        Set-ItemProperty -Path $regPath -Name 'DisplayIcon' -Value $icon
+        Set-ItemProperty -Path $regPath -Name 'UninstallString' -Value $cmd
+        Set-ItemProperty -Path $regPath -Name 'QuietUninstallString' -Value $qcmd
+        Set-ItemProperty -Path $regPath -Name 'NoModify' -Value 1 -Type DWord
+        Set-ItemProperty -Path $regPath -Name 'NoRepair' -Value 1 -Type DWord
+    }"#;
+
+    let output = std::process::Command::new("powershell.exe")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg(ps_script)
+        .arg(install_dir_str.as_ref())
+        .arg(&display_icon)
+        .arg(&uninstall_cmd)
+        .arg(&quiet_cmd)
+        .arg(version)
+        .output()
+        .map_err(|e| InstallError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(InstallError::VerificationFailed(format!(
+            "Gagal mendaftarkan uninstaller Windows: {}",
+            stderr.trim()
+        )));
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn unregister_windows_uninstaller() -> Result<(), InstallError> {
+    let ps_script = r#"& {
+        $regPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\WindowHop'
+        if (Test-Path $regPath) { Remove-Item -Path $regPath -Recurse -Force -ErrorAction SilentlyContinue }
+    }"#;
+    let _ = std::process::Command::new("powershell.exe")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg(ps_script)
+        .output();
+    Ok(())
+}
+
+#[cfg(windows)]
+fn unregister_windows_startup() -> Result<(), InstallError> {
+    let ps_script = r#"& {
+        $regPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+        Remove-ItemProperty -Path $regPath -Name 'WindowHop' -ErrorAction SilentlyContinue
+    }"#;
+    let _ = std::process::Command::new("powershell.exe")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg(ps_script)
+        .output();
+    Ok(())
+}
+
+/// Menjalankan instalasi aplikasi Window Hop ke lokasi yang konsisten.
+pub fn install(options: &InstallOptions) -> Result<InstallReceipt, InstallError> {
     fs::create_dir_all(&options.install_dir)?;
 
     let installed_exe = options.install_dir.join("window-hop.exe");
-    fs::copy(&options.source_exe, &installed_exe)?;
+
+    if let Some(payload_bytes) = options.embedded_payload {
+        fs::write(&installed_exe, payload_bytes)?;
+    } else if options.source_exe.exists() {
+        fs::copy(&options.source_exe, &installed_exe)?;
+    } else {
+        return Err(InstallError::MissingPayload(options.source_exe.clone()));
+    }
 
     let mut installed_files = vec![installed_exe.clone()];
 
@@ -273,6 +485,34 @@ pub fn install(options: &InstallOptions) -> Result<InstallReceipt, InstallError>
         installed_files.push(guide_path);
     }
 
+    #[allow(unused_mut)]
+    let mut shortcuts_created = Vec::new();
+
+    #[cfg(windows)]
+    {
+        if options.create_start_menu_shortcut {
+            if let Some(start_dir) = start_menu_dir() {
+                let shortcut_path = start_dir.join("Window Hop.lnk");
+                if let Ok(()) = create_windows_shortcut(&shortcut_path, &installed_exe, "") {
+                    shortcuts_created.push(shortcut_path);
+                }
+            }
+        }
+
+        if options.create_desktop_shortcut {
+            if let Some(desktop) = desktop_dir() {
+                let shortcut_path = desktop.join("Window Hop.lnk");
+                if let Ok(()) = create_windows_shortcut(&shortcut_path, &installed_exe, "") {
+                    shortcuts_created.push(shortcut_path);
+                }
+            }
+        }
+
+        if options.register_uninstaller {
+            let _ = register_windows_uninstaller(&options.install_dir, &installed_exe);
+        }
+    }
+
     let manifest_path = options.install_dir.join("install-manifest.json");
     let manifest = InstallManifest {
         app_name: "Window Hop".to_string(),
@@ -280,6 +520,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReceipt, InstallError>
         installed_exe: installed_exe.clone(),
         installed_files: installed_files.clone(),
         installed_at: current_timestamp_iso8601(),
+        shortcuts_created: shortcuts_created.clone(),
     };
 
     let manifest_json = serde_json::to_string_pretty(&manifest)
@@ -287,7 +528,9 @@ pub fn install(options: &InstallOptions) -> Result<InstallReceipt, InstallError>
     fs::write(&manifest_path, manifest_json)?;
     installed_files.push(manifest_path.clone());
 
-    verify_installation(&options.install_dir)
+    let mut receipt = verify_installation(&options.install_dir)?;
+    receipt.shortcuts_created = shortcuts_created;
+    Ok(receipt)
 }
 
 /// Memverifikasi integritas berkas instalasi Window Hop pada direktori yang ditentukan.
@@ -316,5 +559,86 @@ pub fn verify_installation(install_dir: &Path) -> Result<InstallReceipt, Install
         installed_files: manifest.installed_files,
         manifest_path,
         version: manifest.version,
+        shortcuts_created: manifest.shortcuts_created,
+    })
+}
+
+/// Menghapus dan mencopot instalasi Window Hop beserta shortcut dan pendaftaran sistemnya.
+pub fn uninstall(install_dir: &Path) -> Result<UninstallReceipt, InstallError> {
+    let mut uninstalled_files = Vec::new();
+    let mut cleaned_shortcuts = Vec::new();
+
+    // 1. Unregister Windows Add/Remove Programs dan Run startup key jika di platform Windows
+    #[cfg(windows)]
+    {
+        let _ = unregister_windows_uninstaller();
+        let _ = unregister_windows_startup();
+    }
+
+    // 2. Baca install-manifest.json jika ada untuk membersihkan file dan shortcut yang tercatat
+    let manifest_path = install_dir.join("install-manifest.json");
+    if manifest_path.exists() {
+        if let Ok(content) = fs::read_to_string(&manifest_path) {
+            if let Ok(manifest) = serde_json::from_str::<InstallManifest>(&content) {
+                for sc in manifest.shortcuts_created {
+                    if sc.exists() {
+                        let _ = fs::remove_file(&sc);
+                        cleaned_shortcuts.push(sc);
+                    }
+                }
+                for f in manifest.installed_files {
+                    if f.exists() {
+                        let _ = fs::remove_file(&f);
+                        uninstalled_files.push(f);
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Bersihkan shortcut Start Menu & Desktop default jika masih tersisa
+    #[cfg(windows)]
+    {
+        if let Some(start_dir) = start_menu_dir() {
+            let sc = start_dir.join("Window Hop.lnk");
+            if sc.exists() {
+                let _ = fs::remove_file(&sc);
+                cleaned_shortcuts.push(sc);
+            }
+            let _ = fs::remove_dir(&start_dir);
+        }
+        if let Some(desktop) = desktop_dir() {
+            let sc = desktop.join("Window Hop.lnk");
+            if sc.exists() {
+                let _ = fs::remove_file(&sc);
+                cleaned_shortcuts.push(sc);
+            }
+        }
+    }
+
+    // 4. Bersihkan file-file standar di folder instalasi jika belum terhapus
+    let known_files = [
+        "window-hop.exe",
+        "INSTALL-GUIDE.txt",
+        "install-manifest.json",
+        "uninstall.exe",
+        "window-hop-installer.exe",
+    ];
+
+    for name in known_files {
+        let p = install_dir.join(name);
+        if p.exists() {
+            let _ = fs::remove_file(&p);
+            uninstalled_files.push(p);
+        }
+    }
+
+    // 5. Hapus folder instalasi jika kosong
+    let _ = fs::remove_dir(install_dir);
+
+    Ok(UninstallReceipt {
+        uninstalled_files,
+        cleaned_shortcuts,
+        success: true,
     })
 }

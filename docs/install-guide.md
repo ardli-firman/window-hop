@@ -24,29 +24,44 @@ Untuk memastikan jalan pintas (shortcut) dan startup otomatis berfungsi konsiste
   *(contoh: `C:\Users\Perawat\AppData\Local\Programs\Window Hop\window-hop.exe`)*
 - **Berkas yang Tersedia pada Hasil Instalasi**:
   1. `window-hop.exe` — executable utama aplikasi dan koordinator.
-  2. `INSTALL-GUIDE.txt` — ringkasan batasan OS/runtime dan petunjuk pemasangan.
-  3. `install-manifest.json` — catatan integritas versi, berkas terpasang, dan stempel waktu instalasi.
+  2. `uninstall.exe` — executable uninstaller untuk pencopotan bersih.
+  3. `INSTALL-GUIDE.txt` — ringkasan batasan OS/runtime dan petunjuk pemasangan.
+  4. `install-manifest.json` — catatan integritas versi, berkas terpasang, shortcut yang dibuat, dan stempel waktu instalasi.
+- **Integrasi Windows**:
+  1. **Start Menu**: Shortcut dibuat di `Start Menu\Programs\Window Hop\Window Hop.lnk`.
+  2. **Desktop**: Shortcut dibuat di Desktop perawat (`Window Hop.lnk`).
+  3. **Installed Apps (Add/Remove Programs)**: Terdaftar di `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\WindowHop` sehingga aplikasi tercatat di Windows Settings dan dapat di-uninstall sewaktu-waktu.
 
 ## 3. Cara Pemasangan
 
-### Pemasangan Standar (Interaktif atau Senyap)
+### Pilihan 1: Bundel Setup Standar (Wizard GUI Modern)
 
-Petugas dapat menjalankan installer executable:
+Unduh `WindowHop-Setup.exe` (atau `WindowHop-Setup-v<versi>.exe`) dari GitHub Artifacts / Releases. Cukup klik ganda berkas tersebut untuk membuka wizard pemasangan:
+1. Ikuti petunjuk wizard (lokasi default: `%LOCALAPPDATA%\Programs\Window Hop`).
+2. Wizard akan memasang berkas, membuat shortcut Start Menu dan Desktop, serta mendaftarkan uninstaller Windows.
+3. Di halaman akhir, centang "Jalankan Window Hop sekarang" untuk langsung menggunakan aplikasi.
+
+Untuk instalasi senyap tanpa interaksi pengguna (unattended deployment):
+```powershell
+.\WindowHop-Setup.exe /S
+```
+
+### Pilihan 2: Installer Mandiri (CLI & Dialog Konfirmasi)
+
+Petugas juga dapat menjalankan `window-hop-installer.exe` (berisi payload aplikasi tersemat mandiri):
 
 ```powershell
-# Pemasangan standar ke %LOCALAPPDATA%\Programs\Window Hop
+# Pemasangan interaktif ke %LOCALAPPDATA%\Programs\Window Hop
 .\window-hop-installer.exe
 
 # Pemasangan senyap (unattended / silent) untuk deployment otomatis
 .\window-hop-installer.exe --silent
-```
 
-### Pemasangan ke Direktori Khusus
-
-Jika workstation memerlukan instalasi di lokasi lain (misal drive D:):
-
-```powershell
+# Pemasangan ke direktori khusus
 .\window-hop-installer.exe --dir "D:\Aplikasi\Window Hop"
+
+# Pencopotan instalasi (uninstallation)
+.\window-hop-installer.exe --uninstall
 ```
 
 ## 4. Perilaku Shortcut Profil dan Startup
@@ -134,7 +149,7 @@ make tag
 
 Alur kerja GitHub Actions (`.github/workflows/build-installer.yml`) berjalan otomatis untuk:
 1. Menjalankan linter (`cargo fmt`, `cargo clippy -D warnings`) dan pengujian (`cargo test`) pada Linux.
-2. Membangun executable `window-hop.exe` dan `window-hop-installer.exe` menggunakan `make` pada runner Windows (`windows-latest`, target `x86_64-pc-windows-msvc`).
+2. Membangun executable `window-hop.exe`, installer mandiri tersemat `window-hop-installer.exe`, serta wizard setup Windows modern `WindowHop-Setup.exe` menggunakan `make` pada runner Windows (`windows-latest`, target `x86_64-pc-windows-msvc`).
 3. Menguji eksekusi `window-hop-installer.exe --help` langsung pada lingkungan Windows runner.
-4. Menghasilkan checksum SHA-256 dan mengunggah artefak build yang siap diunduh.
-5. Saat push tag `v*` (contoh: `v0.1.0`), alur kerja otomatis membuat GitHub Release dan melampirkan berkas installer `.exe` serta paket `.zip`.
+4. Menghasilkan checksum SHA-256 dan mengunggah artefak build yang siap unduh dan pakai (`WindowHop-Setup-v*.exe`, `window-hop-installer.exe`, `window-hop-v*-portable.zip`).
+5. Saat push tag `v*` (contoh: `v0.1.0`), alur kerja otomatis membuat GitHub Release dan melampirkan berkas installer setup `.exe` serta arsip `.zip` portable.
