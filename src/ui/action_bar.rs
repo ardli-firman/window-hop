@@ -1,15 +1,11 @@
-//! Action bar controls (save, activate, restart, stop, shortcut, delete, reset).
+//! Dashboard quick-action model and activation lifecycle commands.
 
 use std::path::PathBuf;
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Disableable as _, IconName};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::application::{ActivationResult, StopOutcome};
-use crate::domain::ProfileLifecycleState;
-use crate::ui::tokens::ShadcnTokens;
+use crate::domain::{ProfileId, ProfileLifecycleState};
 use crate::ui::WindowHopView;
 
 /// Jenis aksi pada action bar profil.
@@ -242,276 +238,14 @@ impl ActionBarModel {
 }
 
 impl WindowHopView {
-    /// Renders the action buttons at the bottom of the profile detail form as a sticky action bar.
-    pub(crate) fn render_action_bar(
-        &self,
-        _shadcn: &ShadcnTokens,
-        cx: &Context<Self>,
-    ) -> impl IntoElement {
-        let theme = cx.theme().clone();
-        let is_busy = self.is_busy;
-        let is_selected = self.selected_profile_id.is_some();
-        let is_confirming_delete = self.confirming_delete_profile.is_some();
-
-        let lifecycle_state = self
-            .selected_profile_id
-            .as_ref()
-            .and_then(|id| self.cached_lifecycle_states.get(id));
-
-        let has_changes = self
-            .selected_profile_id
-            .as_ref()
-            .map(|pid| self.cached_has_running_changes.contains(pid))
-            .unwrap_or(false);
-
-        let model = ActionBarModel::evaluate(lifecycle_state, has_changes, is_selected, is_busy);
-
-        h_flex()
-            .id("sticky-action-bar")
-            .w_full()
-            .flex_shrink_0()
-            .justify_between()
-            .items_center()
-            .flex_wrap()
-            .gap_3()
-            .p_3()
-            .border_t_1()
-            .border_color(theme.border)
-            .bg(theme.tokens.group_box)
-            // Sisi Kiri: Tombol aksi sekunder
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_2()
-                    .items_center()
-                    .flex_wrap()
-                    .children(
-                        model.secondary_actions.into_iter().map(|action| {
-                            let action_id = action.id;
-                            let is_disabled = action.is_disabled || is_confirming_delete;
-                            let mut btn = Button::new(action_id)
-                                .label(action.label.clone())
-                                .disabled(is_disabled);
-
-                            if action.is_danger {
-                                btn = btn.danger();
-                            }
-
-                            match action.kind {
-                                ActionKind::Save => btn
-                                    .primary()
-                                    .icon(IconName::Check)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.save_profile(window, cx);
-                                    }))
-                                    .into_any_element(),
-                                ActionKind::CreateDesktopShortcut => {
-                                    let custom_folder_str = self
-                                        .shortcut_folder_input
-                                        .read(cx)
-                                        .value()
-                                        .trim()
-                                        .to_string();
-                                    let custom_folder = if custom_folder_str.is_empty() {
-                                        None
-                                    } else {
-                                        Some(std::path::PathBuf::from(custom_folder_str.clone()))
-                                    };
-                                    let options_model = ShortcutOptionsModel::new(custom_folder);
-                                    let theme = cx.theme().clone();
-
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .relative()
-                                        .child(
-                                            btn.outline()
-                                                .icon(IconName::FileText)
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.create_desktop_shortcut_for_selected_profile(cx);
-                                                })),
-                                        )
-                                        .child(
-                                            Button::new("btn-shortcut-options-toggle")
-                                                .label("▾")
-                                                .compact()
-                                                .disabled(is_disabled)
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.is_shortcut_popover_open =
-                                                        !this.is_shortcut_popover_open;
-                                                    cx.notify();
-                                                })),
-                                        )
-                                        .when(self.is_shortcut_popover_open, |container| {
-                                            container.child(
-                                                v_flex()
-                                                    .id("shortcut-options-popover")
-                                                    .absolute()
-                                                    .bottom(px(42.0))
-                                                    .left_0()
-                                                    .w(px(320.0))
-                                                    .p_3()
-                                                    .rounded_lg()
-                                                    .border_1()
-                                                    .border_color(theme.border)
-                                                    .bg(theme.tokens.group_box)
-                                                    .shadow_lg()
-                                                    .gap_2()
-                                                    .child(
-                                                        h_flex()
-                                                            .justify_between()
-                                                            .items_center()
-                                                            .child(
-                                                                div()
-                                                                    .text_xs()
-                                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                                    .child("Opsi Folder Pintasan"),
-                                                            )
-                                                            .child(
-                                                                Button::new("btn-close-shortcut-popover")
-                                                                    .label("✕")
-                                                                    .compact()
-                                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                                        this.is_shortcut_popover_open = false;
-                                                                        cx.notify();
-                                                                    })),
-                                                            ),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_xs()
-                                                            .text_color(theme.muted_foreground)
-                                                            .child(format!(
-                                                                "Lokasi target: {}",
-                                                                options_model.destination_display()
-                                                            )),
-                                                    )
-                                                    .child(
-                                                        Button::new("btn-create-desktop-popover")
-                                                            .label("Buat di Desktop (Default)")
-                                                            .disabled(is_disabled)
-                                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                                this.is_shortcut_popover_open = false;
-                                                                this.create_desktop_shortcut_for_selected_profile(cx);
-                                                            })),
-                                                    )
-                                                    .child(
-                                                        Button::new("btn-browse-popover-folder")
-                                                            .label("Pilih Folder Lain...")
-                                                            .disabled(is_disabled)
-                                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                                this.browse_shortcut_folder(cx);
-                                                            })),
-                                                    )
-                                                    .when(!custom_folder_str.is_empty(), |popover| {
-                                                        popover.child(
-                                                            Button::new("btn-create-custom-shortcut")
-                                                                .label("Buat di Folder Kustom")
-                                                                .disabled(is_disabled)
-                                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                                    this.is_shortcut_popover_open = false;
-                                                                    this.create_shortcut_for_selected_profile(window, cx);
-                                                                })),
-                                                        )
-                                                    }),
-                                            )
-                                        })
-                                        .into_any_element()
-                                }
-                                ActionKind::Stop => btn
-                                    .outline()
-                                    .danger()
-                                    .icon(IconName::Square)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.stop_selected_profile(cx);
-                                    }))
-                                    .into_any_element(),
-                                ActionKind::Delete => btn
-                                    .ghost()
-                                    .danger()
-                                    .icon(IconName::Delete)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.request_delete_selected_profile(cx);
-                                    }))
-                                    .into_any_element(),
-                                ActionKind::Reset => btn
-                                    .outline()
-                                    .icon(IconName::Undo)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        let id = this.selected_profile_id.clone();
-                                        this.select_profile(id, window, cx);
-                                    }))
-                                    .into_any_element(),
-                                _ => btn.into_any_element(),
-                            }
-                        }),
-                    ),
-            )
-            // Sisi Kanan: Tombol aksi primer kontekstual
-            .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .gap_2()
-                    .items_center()
-                    .child({
-                        let action = model.primary_action;
-                        let action_id = action.id;
-                        let is_disabled = action.is_disabled || is_confirming_delete;
-                        let mut btn = Button::new(action_id)
-                            .primary()
-                            .label(action.label)
-                            .disabled(is_disabled);
-
-                        match action.kind {
-                            ActionKind::Save => {
-                                btn = btn.icon(IconName::Check);
-                                btn.on_click(cx.listener(|this, _, window, cx| {
-                                    this.save_profile(window, cx);
-                                }))
-                            }
-                            ActionKind::Activate => {
-                                btn = btn.icon(IconName::Play);
-                                btn.on_click(cx.listener(|this, _, _, cx| {
-                                    this.activate_selected_profile(cx);
-                                }))
-                            }
-                            ActionKind::OpenWindow => {
-                                btn = btn.icon(IconName::ExternalLink);
-                                btn.on_click(cx.listener(|this, _, _, cx| {
-                                    this.activate_selected_profile(cx);
-                                }))
-                            }
-                            ActionKind::Reconnect => {
-                                btn = btn.icon(IconName::Network);
-                                btn.on_click(cx.listener(|this, _, _, cx| {
-                                    this.activate_selected_profile(cx);
-                                }))
-                            }
-                            ActionKind::ApplyRestart => {
-                                btn = btn.icon(IconName::RotateCw);
-                                btn.on_click(cx.listener(|this, _, _, cx| {
-                                    this.restart_selected_profile(cx);
-                                }))
-                            }
-                            _ => btn,
-                        }
-                    }),
-            )
-    }
-
-    /// Mengaktifkan profil yang sedang dipilih melalui LifecycleCoordinator.
+    /// Mengaktifkan profil tertentu melalui LifecycleCoordinator.
     /// Dijalankan di background executor untuk menjaga kelancaran antarmuka pengguna.
-    pub fn activate_selected_profile(&mut self, cx: &mut Context<Self>) {
+    pub fn activate_profile(&mut self, pid: ProfileId, cx: &mut Context<Self>) {
         if self.is_busy {
             return;
         }
-        let Some(ref pid) = self.selected_profile_id else {
-            return;
-        };
 
         self.is_busy = true;
-        let pid = pid.clone();
         let coordinator = self.coordinator.clone();
         self.status_message = Some("Mengaktifkan profil...".to_string());
         self.is_error = false;
@@ -568,18 +302,21 @@ impl WindowHopView {
         .detach();
     }
 
-    /// Menghentikan profil yang sedang dipilih melalui LifecycleCoordinator.
+    /// Mengaktifkan profil yang sedang dipilih melalui LifecycleCoordinator.
+    pub fn activate_selected_profile(&mut self, cx: &mut Context<Self>) {
+        if let Some(pid) = self.selected_profile_id.clone() {
+            self.activate_profile(pid, cx);
+        }
+    }
+
+    /// Menghentikan profil tertentu melalui LifecycleCoordinator.
     /// Dijalankan di background executor untuk menjaga kelancaran antarmuka pengguna.
-    pub fn stop_selected_profile(&mut self, cx: &mut Context<Self>) {
+    pub fn stop_profile(&mut self, pid: ProfileId, cx: &mut Context<Self>) {
         if self.is_busy {
             return;
         }
-        let Some(ref pid) = self.selected_profile_id else {
-            return;
-        };
 
         self.is_busy = true;
-        let pid = pid.clone();
         let coordinator = self.coordinator.clone();
         self.status_message = Some("Menghentikan profil...".to_string());
         self.is_error = false;
@@ -632,18 +369,21 @@ impl WindowHopView {
         .detach();
     }
 
-    /// Menjalankan ulang profil yang sedang dipilih melalui LifecycleCoordinator.
+    /// Menghentikan profil yang sedang dipilih.
+    pub fn stop_selected_profile(&mut self, cx: &mut Context<Self>) {
+        if let Some(pid) = self.selected_profile_id.clone() {
+            self.stop_profile(pid, cx);
+        }
+    }
+
+    /// Menjalankan ulang profil tertentu dengan konfigurasi terbaru.
     /// Dijalankan di background executor untuk menjaga kelancaran antarmuka pengguna.
-    pub fn restart_selected_profile(&mut self, cx: &mut Context<Self>) {
+    pub fn restart_profile(&mut self, pid: ProfileId, cx: &mut Context<Self>) {
         if self.is_busy {
             return;
         }
-        let Some(ref pid) = self.selected_profile_id else {
-            return;
-        };
 
         self.is_busy = true;
-        let pid = pid.clone();
         let coordinator = self.coordinator.clone();
         self.status_message = Some("Menjalankan ulang profil...".to_string());
         self.is_error = false;
@@ -698,5 +438,12 @@ impl WindowHopView {
             }
         })
         .detach();
+    }
+
+    /// Menjalankan ulang profil yang sedang dipilih.
+    pub fn restart_selected_profile(&mut self, cx: &mut Context<Self>) {
+        if let Some(pid) = self.selected_profile_id.clone() {
+            self.restart_profile(pid, cx);
+        }
     }
 }

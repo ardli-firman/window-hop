@@ -222,31 +222,35 @@ impl WindowHopView {
         )
     }
 
-    /// Meminta konfirmasi penghapusan profil yang sedang dipilih jika profil sedang aktif.
+    /// Meminta konfirmasi penghapusan profil tertentu jika profil sedang aktif.
     /// Jika profil tidak aktif (draft/idle), langsung menjalankan penghapusan.
-    pub fn request_delete_selected_profile(&mut self, cx: &mut Context<Self>) {
+    pub fn request_delete_profile(&mut self, pid: ProfileId, cx: &mut Context<Self>) {
         if self.is_busy {
             return;
         }
-        let Some(ref pid) = self.selected_profile_id else {
-            return;
-        };
 
-        let is_running = self.cached_running_ids.contains(pid);
+        let is_running = self.cached_running_ids.contains(&pid);
         let is_running_state = self
             .cached_lifecycle_states
-            .get(pid)
+            .get(&pid)
             .map(|s| DeleteConfirmationModalModel::should_prompt_confirmation(s.is_running()))
             .unwrap_or(false);
 
         if is_running || is_running_state {
             // Minta konfirmasi sebelum menghapus profil aktif
-            self.confirming_delete_profile = Some(pid.clone());
+            self.confirming_delete_profile = Some(pid);
             self.status_message = None;
             self.is_error = false;
             cx.notify();
         } else {
-            self.execute_delete_profile(pid.clone(), cx);
+            self.execute_delete_profile(pid, cx);
+        }
+    }
+
+    /// Meminta konfirmasi penghapusan profil yang sedang dipilih.
+    pub fn request_delete_selected_profile(&mut self, cx: &mut Context<Self>) {
+        if let Some(pid) = self.selected_profile_id.clone() {
+            self.request_delete_profile(pid, cx);
         }
     }
 
@@ -273,6 +277,7 @@ impl WindowHopView {
 
         let coordinator = self.coordinator.clone();
         let target_pid = pid.clone();
+        let was_editing = self.selected_profile_id.as_ref() == Some(&pid);
         self.status_message = Some(format!("Menghapus profil '{}'...", profile_name));
         self.is_error = false;
         cx.notify();
@@ -303,11 +308,16 @@ impl WindowHopView {
 
                         match result {
                             Ok(stop_outcome) => {
-                                // Bersihkan formulir dan seleksi profil
-                                view.selected_profile_id = None;
-                                let _ = window_handle.update(cx, |_view, window, cx| {
-                                    view.reset_form_inputs(window, cx);
-                                });
+                                // Tutup wizard hanya jika profil yang dihapus sedang diedit
+                                if was_editing {
+                                    view.selected_profile_id = None;
+                                    view.is_profile_modal_open = false;
+                                    view.wizard_step = crate::ui::ProfileWizardStep::Application;
+                                    view.wizard_error = None;
+                                    let _ = window_handle.update(cx, |_view, window, cx| {
+                                        view.reset_form_inputs(window, cx);
+                                    });
+                                }
 
                                 let stop_detail = match stop_outcome {
                                     StopOutcome::Graceful { .. } => {
@@ -325,8 +335,11 @@ impl WindowHopView {
                                 view.is_error = false;
                             }
                             Err(err) => {
-                                view.status_message =
-                                    Some(format!("Gagal menghapus profil: {}", err));
+                                let message = format!("Gagal menghapus profil: {}", err);
+                                if view.is_profile_modal_open {
+                                    view.wizard_error = Some(message.clone());
+                                }
+                                view.status_message = Some(message);
                                 view.is_error = true;
                             }
                         }

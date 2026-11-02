@@ -210,7 +210,7 @@ impl WindowHopView {
                         div()
                             .text_sm()
                             .font_weight(FontWeight::MEDIUM)
-                            .child("Monitor Tujuan (Direkam Berdasarkan Identitas):"),
+                            .child("Monitor Terhubung Saat Ini:"),
                     )
                     .child(
                         h_flex()
