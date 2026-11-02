@@ -4,7 +4,6 @@ use std::collections::HashSet;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tag::{Tag as Badge, TagVariant};
 use gpui_kit::component::{
     h_flex, v_flex, ActiveTheme, Disableable as _, Icon, IconName, Sizable as _,
@@ -22,6 +21,41 @@ use crate::ui::WindowHopView;
 
 /// Number of profile cards per row on the dashboard grid.
 pub const DASHBOARD_GRID_COLUMNS: u16 = 2;
+
+/// Model aksi tombol di header dashboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderButtonModel {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub icon_name: &'static str,
+    pub is_disabled: bool,
+}
+
+/// Model representasi header dashboard dan tombol aksinya.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashboardHeaderModel {
+    pub settings_button: HeaderButtonModel,
+    pub add_profile_button: HeaderButtonModel,
+}
+
+impl DashboardHeaderModel {
+    pub fn evaluate(is_busy: bool) -> Self {
+        Self {
+            settings_button: HeaderButtonModel {
+                id: "btn-open-settings",
+                label: "Pengaturan",
+                icon_name: "Settings",
+                is_disabled: is_busy,
+            },
+            add_profile_button: HeaderButtonModel {
+                id: "btn-add-profile",
+                label: "+ Profil Baru",
+                icon_name: "Plus",
+                is_disabled: is_busy,
+            },
+        }
+    }
+}
 
 /// Ringkasan angka pada strip preferensi dashboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,6 +203,7 @@ impl WindowHopView {
             &self.cached_running_ids,
             self.cached_startup_profile_id.as_ref(),
         );
+        let header_model = DashboardHeaderModel::evaluate(self.is_busy);
         let search_query = self.search_input.read(cx).value().to_string();
         let show_search = should_show_profile_search(profiles.len());
         let filtered_profiles = filter_profiles_by_query(&profiles, &search_query);
@@ -204,96 +239,26 @@ impl WindowHopView {
                             ),
                     )
                     .child(
-                        Button::new("btn-add-profile")
-                            .primary()
-                            .icon(IconName::Plus)
-                            .label("Tambah Profil")
-                            .disabled(self.is_busy)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_new_profile_modal(window, cx);
-                            })),
-                    ),
-            )
-            // Strip preferensi startup Windows (selalu terlihat, tidak tersembunyi di form)
-            .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .justify_between()
-                    .items_center()
-                    .flex_wrap()
-                    .gap_3()
-                    .p_3()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.tokens.group_box)
-                    .child(
                         h_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_3()
                             .items_center()
+                            .gap_2()
                             .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .p_2()
-                                    .rounded_full()
-                                    .bg(if self.cached_startup_enabled {
-                                        theme.primary.opacity(0.12)
-                                    } else {
-                                        theme.muted
-                                    })
-                                    .child(
-                                        Icon::new(IconName::RefreshCw)
-                                            .size_4()
-                                            .text_color(if self.cached_startup_enabled {
-                                                theme.primary
-                                            } else {
-                                                theme.muted_foreground
-                                            }),
-                                    ),
+                                Button::new(header_model.settings_button.id)
+                                    .icon(IconName::Settings)
+                                    .label(header_model.settings_button.label)
+                                    .disabled(header_model.settings_button.is_disabled)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.open_settings_modal(cx);
+                                    })),
                             )
                             .child(
-                                v_flex()
-                                    .min_w_0()
-                                    .gap_0p5()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child("Mulai otomatis saat login Windows"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(if self.cached_startup_enabled {
-                                                theme.primary
-                                            } else {
-                                                theme.muted_foreground
-                                            })
-                                            .child(startup_status_text(
-                                                self.cached_startup_enabled,
-                                                stats.startup_profile_name.as_deref(),
-                                            )),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .flex_shrink_0()
-                            .gap_3()
-                            .items_center()
-                            .child(
-                                Badge::new()
-                                    .with_variant(TagVariant::Secondary)
-                                    .child(stats.summary_label()),
-                            )
-                            .child(
-                                Switch::new("switch-global-startup")
-                                    .checked(self.cached_startup_enabled)
-                                    .disabled(self.is_busy)
-                                    .on_change(cx.listener(|this, checked, _, cx| {
-                                        this.set_startup_enabled(*checked, cx);
+                                Button::new(header_model.add_profile_button.id)
+                                    .primary()
+                                    .icon(IconName::Plus)
+                                    .label(header_model.add_profile_button.label)
+                                    .disabled(header_model.add_profile_button.is_disabled)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_new_profile_modal(window, cx);
                                     })),
                             ),
                     ),
@@ -319,7 +284,7 @@ impl WindowHopView {
                             .child(
                                 Badge::new()
                                     .with_variant(TagVariant::Secondary)
-                                    .child(format!("{}", profiles.len())),
+                                    .child(stats.summary_label()),
                             ),
                     )
                     .when(show_search, |this| {
@@ -642,14 +607,6 @@ impl WindowHopView {
                         this.open_new_profile_modal(window, cx);
                     })),
             )
-    }
-}
-
-fn startup_status_text(enabled: bool, startup_profile_name: Option<&str>) -> String {
-    match (enabled, startup_profile_name) {
-        (true, Some(name)) => format!("Aktif · Profil startup: {}", name),
-        (true, None) => "Aktif · Belum ada profil startup yang dipilih".to_string(),
-        (false, _) => "Nonaktif · Aktifkan agar antrian siap setelah login".to_string(),
     }
 }
 

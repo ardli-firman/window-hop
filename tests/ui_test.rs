@@ -23,10 +23,11 @@ use window_hop::ui::tokens::{
 };
 use window_hop::ui::{
     find_occupying_profile, validate_wizard_step, ActionBarModel, ActionKind,
-    BrowserCompatibilityBadge, BrowserQuickTileModel, DeleteConfirmationModalModel,
-    MonitorCardModel, ProfileWizardStep, ShortcutOptionsModel, StartupCardModel, WindowHopView,
-    WizardValidationError, DISCONNECTED_BADGE, DISCONNECTED_WARNING, MONITOR_POLL_INTERVAL,
-    NURSE_PRIMARY_BADGE, NURSE_PRIMARY_WARNING, RECOMMENDED_QUEUE_BADGE, WIZARD_STEP_COUNT,
+    BrowserCompatibilityBadge, BrowserQuickTileModel, DashboardHeaderModel,
+    DeleteConfirmationModalModel, MonitorCardModel, ProfileWizardStep, SettingsModalModel,
+    ShortcutOptionsModel, StartupCardModel, WindowHopView, WizardValidationError,
+    DISCONNECTED_BADGE, DISCONNECTED_WARNING, MONITOR_POLL_INTERVAL, NURSE_PRIMARY_BADGE,
+    NURSE_PRIMARY_WARNING, RECOMMENDED_QUEUE_BADGE, WIZARD_STEP_COUNT,
 };
 
 #[test]
@@ -1250,4 +1251,81 @@ fn test_wizard_validation_error_is_structured() {
     };
     assert_eq!(error.step.index(), 1);
     assert!(error.message.starts_with("URL"));
+}
+
+#[test]
+fn test_settings_modal_and_dashboard_header_startup_migration() {
+    // 1. Header dashboard has settings button with gear icon next to add profile button
+    let header = DashboardHeaderModel::evaluate(false);
+    assert_eq!(header.settings_button.id, "btn-open-settings");
+    assert_eq!(header.settings_button.label, "Pengaturan");
+    assert_eq!(header.settings_button.icon_name, "Settings");
+    assert!(!header.settings_button.is_disabled);
+
+    assert_eq!(header.add_profile_button.id, "btn-add-profile");
+    assert_eq!(header.add_profile_button.label, "+ Profil Baru");
+    assert_eq!(header.add_profile_button.icon_name, "Plus");
+    assert!(!header.add_profile_button.is_disabled);
+
+    // When busy, both buttons are disabled
+    let header_busy = DashboardHeaderModel::evaluate(true);
+    assert!(header_busy.settings_button.is_disabled);
+    assert!(header_busy.add_profile_button.is_disabled);
+
+    // 2. Settings Modal Model: closed by default, openable
+    let mut modal = SettingsModalModel::new();
+    assert!(!modal.is_open);
+    modal.open(true, Some("Poli Rawat Jalan"));
+    assert!(modal.is_open);
+    assert_eq!(modal.title, "Pengaturan Aplikasi");
+    assert!(modal.description.contains("preferensi"));
+    assert_eq!(
+        modal.startup_switch_label,
+        "Mulai otomatis saat login Windows"
+    );
+    assert!(modal.startup_enabled);
+    assert!(modal.startup_description.contains("latar belakang"));
+    assert_eq!(
+        modal.startup_status_text,
+        "Aktif · Profil startup: Poli Rawat Jalan"
+    );
+    assert_eq!(modal.close_button_label, "Tutup");
+
+    // 3. Modifying startup switch in the modal directly updates model state
+    modal.set_startup_enabled(false, Some("Poli Rawat Jalan"));
+    assert!(!modal.startup_enabled);
+    assert!(modal.startup_description.contains("tidak akan dijalankan"));
+    assert_eq!(
+        modal.startup_status_text,
+        "Nonaktif · Aktifkan agar antrian siap setelah login"
+    );
+
+    modal.set_startup_enabled(true, None);
+    assert!(modal.startup_enabled);
+    assert_eq!(
+        modal.startup_status_text,
+        "Aktif · Belum ada profil startup yang dipilih"
+    );
+
+    // 4. Close modal returns to dashboard
+    modal.close();
+    assert!(!modal.is_open);
+
+    // 5. Verification that dashboard no longer contains the global startup strip banner
+    let dashboard_source = include_str!("../src/ui/dashboard.rs");
+    assert!(
+        !dashboard_source.contains("switch-global-startup"),
+        "Dashboard must not contain switch-global-startup strip banner"
+    );
+    assert!(
+        !dashboard_source.contains("Strip preferensi startup Windows"),
+        "Dashboard must not contain strip preferensi startup banner"
+    );
+
+    // Verify dialogs or settings modal contains the startup switch
+    let dialogs_source = include_str!("../src/ui/dialogs.rs");
+    assert!(
+        dialogs_source.contains("switch-settings-startup"),
+        "Settings modal must contain the startup switch"
+    );
 }

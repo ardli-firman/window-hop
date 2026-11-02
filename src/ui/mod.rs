@@ -37,8 +37,8 @@ pub mod tokens;
 
 pub use action_bar::{ActionBarAction, ActionBarModel, ActionKind, ShortcutOptionsModel};
 pub use browser_picker::{BrowserCompatibilityBadge, BrowserQuickTileModel};
-pub use dashboard::{DashboardStats, ProfileCardModel};
-pub use dialogs::DeleteConfirmationModalModel;
+pub use dashboard::{DashboardHeaderModel, DashboardStats, HeaderButtonModel, ProfileCardModel};
+pub use dialogs::{DeleteConfirmationModalModel, SettingsModalModel};
 pub use form::StartupCardModel;
 pub use monitor_card::{
     find_occupying_profile, MonitorCardModel, DISCONNECTED_BADGE, DISCONNECTED_WARNING,
@@ -79,6 +79,7 @@ pub struct WindowHopView {
     pub(crate) status_message: Option<String>,
     pub(crate) is_error: bool,
     pub(crate) confirming_delete_profile: Option<ProfileId>,
+    pub(crate) is_settings_modal_open: bool,
     pub(crate) is_profile_modal_open: bool,
     pub(crate) wizard_step: ProfileWizardStep,
     pub(crate) wizard_error: Option<String>,
@@ -285,6 +286,7 @@ impl WindowHopView {
             status_message: initial_error,
             is_error,
             confirming_delete_profile: None,
+            is_settings_modal_open: false,
             is_profile_modal_open: false,
             wizard_step: ProfileWizardStep::Application,
             wizard_error: None,
@@ -416,6 +418,22 @@ impl WindowHopView {
         self.shortcut_folder_input.update(cx, |input, cx| {
             input.set_value("", window, cx);
         });
+    }
+
+    /// Membuka modal dialog Pengaturan Aplikasi.
+    pub fn open_settings_modal(&mut self, cx: &mut Context<Self>) {
+        let coordinator_arc = self.coordinator.clone();
+        if let Ok(coord) = coordinator_arc.try_lock() {
+            self.sync_cache_from_coordinator(&coord);
+        }
+        self.is_settings_modal_open = true;
+        cx.notify();
+    }
+
+    /// Menutup modal dialog Pengaturan Aplikasi dan mengembalikan fokus ke dashboard.
+    pub fn close_settings_modal(&mut self, cx: &mut Context<Self>) {
+        self.is_settings_modal_open = false;
+        cx.notify();
     }
 
     /// Menyimpan profil draft atau profil yang diedit secara asinkron tanpa memblokir thread UI.
@@ -591,6 +609,8 @@ impl Render for WindowHopView {
                     // Dashboard: daftar profil langsung terlihat tanpa panel detail
                     .child(self.render_dashboard(cx)),
             )
+            // Modal dialog Pengaturan Aplikasi
+            .children(self.render_settings_dialog(cx))
             // Modal wizard tambah/edit profil (overlay bertahap)
             .children(self.render_profile_wizard(cx))
             // Modal AlertDialog Konfirmasi Penghapusan (di atas wizard)

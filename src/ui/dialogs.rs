@@ -2,12 +2,74 @@
 
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable as _, Icon, IconName};
 use gpui_kit::*;
 
 use crate::application::StopOutcome;
 use crate::domain::{Profile, ProfileId, ProfileLifecycleState};
 use crate::ui::WindowHopView;
+
+/// Model representasi dialog modal Pengaturan Aplikasi.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsModalModel {
+    pub is_open: bool,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub startup_enabled: bool,
+    pub startup_switch_label: &'static str,
+    pub startup_description: &'static str,
+    pub startup_status_text: String,
+    pub close_button_label: &'static str,
+}
+
+impl SettingsModalModel {
+    /// Membuat model modal pengaturan dalam kondisi tertutup secara default.
+    pub fn new() -> Self {
+        Self {
+            is_open: false,
+            title: "Pengaturan Aplikasi",
+            description: "Kelola preferensi startup Windows dan konfigurasi aplikasi.",
+            startup_enabled: false,
+            startup_switch_label: "Mulai otomatis saat login Windows",
+            startup_description: "Window Hop tidak akan dijalankan otomatis saat login Windows.",
+            startup_status_text: "Nonaktif · Aktifkan agar antrian siap setelah login".to_string(),
+            close_button_label: "Tutup",
+        }
+    }
+
+    /// Membuka modal pengaturan dengan status preferensi startup saat ini.
+    pub fn open(&mut self, enabled: bool, startup_profile_name: Option<&str>) {
+        self.is_open = true;
+        self.set_startup_enabled(enabled, startup_profile_name);
+    }
+
+    /// Menutup modal pengaturan.
+    pub fn close(&mut self) {
+        self.is_open = false;
+    }
+
+    /// Memperbarui preferensi startup dan teks penjelasnya di dalam modal.
+    pub fn set_startup_enabled(&mut self, enabled: bool, startup_profile_name: Option<&str>) {
+        self.startup_enabled = enabled;
+        self.startup_description = if enabled {
+            "Window Hop akan otomatis berjalan di latar belakang (system tray) saat login Windows."
+        } else {
+            "Window Hop tidak akan dijalankan otomatis saat login Windows."
+        };
+        self.startup_status_text = match (enabled, startup_profile_name) {
+            (true, Some(name)) => format!("Aktif · Profil startup: {}", name),
+            (true, None) => "Aktif · Belum ada profil startup yang dipilih".to_string(),
+            (false, _) => "Nonaktif · Aktifkan agar antrian siap setelah login".to_string(),
+        };
+    }
+}
+
+impl Default for SettingsModalModel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Model representasi modal konfirmasi AlertDialog saat menghapus profil aktif.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +155,166 @@ impl WindowHopView {
                     .into_any_element(),
             )
         }
+    }
+
+    /// Merender modal dialog Pengaturan Aplikasi sebagai overlay.
+    pub(crate) fn render_settings_dialog(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
+        if !self.is_settings_modal_open {
+            return None;
+        }
+
+        let theme = cx.theme().clone();
+        let is_busy = self.is_busy;
+        let startup_profile_name = self.cached_startup_profile_id.as_ref().and_then(|sid| {
+            self.cached_profiles
+                .iter()
+                .find(|p| p.id() == sid)
+                .map(|p| p.name())
+        });
+
+        let mut model = SettingsModalModel::new();
+        model.open(self.cached_startup_enabled, startup_profile_name);
+
+        Some(
+            div()
+                .id("settings-modal-backdrop")
+                .absolute()
+                .inset_0()
+                .bg(theme.background.opacity(0.8))
+                .flex()
+                .items_center()
+                .justify_center()
+                .p_4()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.close_settings_modal(cx);
+                }))
+                .child(
+                    div()
+                        .id("settings-dialog")
+                        .w_full()
+                        .max_w(px(560.0))
+                        .p_6()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.tokens.group_box)
+                        .shadow_lg()
+                        .on_click(|_, _, _| {})
+                        .flex()
+                        .flex_col()
+                        .gap_5()
+                        // Header modal
+                        .child(
+                            h_flex().justify_between().items_start().gap_3().child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(
+                                                Icon::new(IconName::Settings)
+                                                    .size_5()
+                                                    .text_color(theme.primary),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_lg()
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .child(model.title),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(theme.muted_foreground)
+                                            .child(model.description),
+                                    ),
+                            ),
+                        )
+                        // Konten pengaturan: Sakelar Startup Windows
+                        .child(
+                            v_flex()
+                                .p_4()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.background)
+                                .gap_3()
+                                .child(
+                                    h_flex()
+                                        .justify_between()
+                                        .items_center()
+                                        .gap_4()
+                                        .child(
+                                            v_flex()
+                                                .min_w_0()
+                                                .gap_1()
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .child(model.startup_switch_label),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(theme.muted_foreground)
+                                                        .child(model.startup_description),
+                                                ),
+                                        )
+                                        .child(
+                                            Switch::new("switch-settings-startup")
+                                                .checked(self.cached_startup_enabled)
+                                                .disabled(is_busy)
+                                                .on_change(cx.listener(|this, checked, _, cx| {
+                                                    this.set_startup_enabled(*checked, cx);
+                                                })),
+                                        ),
+                                )
+                                .child(
+                                    h_flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .p_2()
+                                        .rounded_md()
+                                        .bg(if self.cached_startup_enabled {
+                                            theme.primary.opacity(0.08)
+                                        } else {
+                                            theme.muted
+                                        })
+                                        .child(Icon::new(IconName::Info).size_3p5().text_color(
+                                            if self.cached_startup_enabled {
+                                                theme.primary
+                                            } else {
+                                                theme.muted_foreground
+                                            },
+                                        ))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(if self.cached_startup_enabled {
+                                                    theme.primary
+                                                } else {
+                                                    theme.muted_foreground
+                                                })
+                                                .child(model.startup_status_text),
+                                        ),
+                                ),
+                        )
+                        // Footer / Tombol Tutup
+                        .child(
+                            h_flex().justify_end().child(
+                                Button::new("btn-close-settings")
+                                    .primary()
+                                    .label(model.close_button_label)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_settings_modal(cx);
+                                    })),
+                            ),
+                        ),
+                ),
+        )
     }
 
     /// Renders the confirmation modal dialog when deleting an active running profile.
