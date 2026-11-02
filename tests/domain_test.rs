@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use window_hop::domain::{
-    MonitorDescriptor, MonitorIdentity, Profile, ProfileId, ProfileStatus, TargetMonitorStatus,
+    AppConfig, MonitorDescriptor, MonitorIdentity, Profile, ProfileId, ProfileStatus,
+    TargetMonitorStatus,
 };
 
 #[test]
@@ -164,4 +165,16 @@ fn test_target_monitor_status_evaluate_pure_function() {
             recorded_identity: missing
         }
     );
+}
+
+#[test]
+fn test_app_config_default_initializes_with_startup_enabled_true() {
+    let config = AppConfig::default();
+    assert_eq!(config.schema_version(), 1);
+    assert!(config.profiles().is_empty());
+    assert!(
+        config.startup_enabled(),
+        "AppConfig::default() must initialize startup_enabled: true for zero-touch setup"
+    );
+    assert_eq!(config.startup_profile_id(), None);
 }

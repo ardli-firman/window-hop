@@ -5580,7 +5580,7 @@ fn test_startup_settings_persist_across_restarts() {
         clock.clone(),
         base_dir.clone(),
     );
-    let startup_manager = Arc::new(MockStartupManager::new(false));
+    let startup_manager = Arc::new(MockStartupManager::new(true));
     coordinator.set_startup_manager(startup_manager.clone());
 
     let p_id = coordinator
@@ -5597,16 +5597,11 @@ fn test_startup_settings_persist_across_restarts() {
         )
         .expect("save profile");
 
-    assert!(!coordinator.startup_enabled());
+    // Default startup_enabled is true on initial configuration
+    assert!(coordinator.startup_enabled());
     assert!(coordinator.startup_profile_id().is_none());
 
-    // Enable startup and select startup profile
-    coordinator
-        .set_startup_enabled(true)
-        .expect("enable startup");
-    assert!(coordinator.startup_enabled());
-    assert!(startup_manager.is_registered());
-
+    // Select startup profile
     coordinator
         .set_startup_profile_id(Some(p_id.clone()))
         .expect("set startup profile");
@@ -5755,6 +5750,7 @@ fn test_startup_disabled_does_not_launch_profile() {
         clock,
         base_dir,
     );
+    coordinator.set_startup_manager(Arc::new(MockStartupManager::new(true)));
 
     let p_id = coordinator
         .save_draft_profile(
@@ -5773,6 +5769,11 @@ fn test_startup_disabled_does_not_launch_profile() {
     coordinator
         .set_startup_profile_id(Some(p_id.clone()))
         .expect("set startup profile");
+
+    // Explicitly disable startup (opt-out)
+    coordinator
+        .set_startup_enabled(false)
+        .expect("disable startup");
     assert!(!coordinator.startup_enabled());
 
     let result = coordinator
@@ -6137,8 +6138,15 @@ fn test_startup_settings_os_registration_failure_preserves_state() {
         base_dir,
     );
 
-    let startup_manager = Arc::new(MockStartupManager::new(false));
+    let startup_manager = Arc::new(MockStartupManager::new(true));
     coordinator.set_startup_manager(startup_manager.clone());
+
+    // Disable startup first so we can test registration failure when re-enabling
+    coordinator
+        .set_startup_enabled(false)
+        .expect("disable startup");
+    assert!(!coordinator.startup_enabled());
+    assert!(!startup_manager.is_registered());
 
     // Simulate platform OS registration error
     startup_manager.set_error(Some("Registry permission denied".to_string()));
