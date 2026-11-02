@@ -415,6 +415,98 @@ impl Default for WindowsShortcutCreator {
     }
 }
 
+/// Membuat file shortcut (.lnk) Windows secara native menggunakan Win32 COM API (IShellLinkW & IPersistFile).
+/// Tidak memanggil PowerShell atau WScript.Shell sehingga tidak memicu alarm AMSI / antivirus.
+pub fn create_windows_shortcut(
+    shortcut_path: &std::path::Path,
+    target_exe: &std::path::Path,
+    args: &str,
+    working_dir: Option<&std::path::Path>,
+) -> Result<(), PlatformError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::{Interface, HSTRING, PCWSTR};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+
+    if let Some(parent) = shortcut_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            PlatformError::Os(format!("Gagal membuat folder tujuan shortcut: {}", e))
+        })?;
+    }
+
+    // SAFETY: Inisialisasi COM apartemen pada thread pemanggil.
+    let coinit = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    let need_uninit = coinit.is_ok();
+
+    struct ComGuard(bool);
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            if self.0 {
+                // SAFETY: CoUninitialize dipanggil hanya jika CoInitializeEx berhasil pada thread ini.
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+    let _guard = ComGuard(need_uninit);
+
+    // SAFETY: CoCreateInstance membuat objek ShellLink native in-process.
+    let shell_link: IShellLinkW = unsafe {
+        CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).map_err(|e| {
+            PlatformError::Os(format!("Gagal membuat instance COM ShellLink: {}", e))
+        })?
+    };
+
+    let target_str = target_exe.to_string_lossy();
+    let target_h = HSTRING::from(target_str.as_ref());
+    // SAFETY: Mengatur jalur executable target shortcut.
+    unsafe {
+        shell_link.SetPath(&target_h).map_err(|e| {
+            PlatformError::Os(format!("Gagal mengatur target executable shortcut: {}", e))
+        })?;
+    }
+
+    if !args.is_empty() {
+        let args_h = HSTRING::from(args);
+        // SAFETY: Mengatur argumen baris perintah shortcut.
+        unsafe {
+            shell_link.SetArguments(&args_h).map_err(|e| {
+                PlatformError::Os(format!("Gagal mengatur argumen shortcut: {}", e))
+            })?;
+        }
+    }
+
+    let effective_workdir = working_dir.or_else(|| target_exe.parent());
+    if let Some(dir) = effective_workdir {
+        let dir_str = dir.to_string_lossy();
+        let dir_h = HSTRING::from(dir_str.as_ref());
+        // SAFETY: Mengatur direktori kerja awal shortcut.
+        unsafe {
+            shell_link.SetWorkingDirectory(&dir_h).map_err(|e| {
+                PlatformError::Os(format!("Gagal mengatur direktori kerja shortcut: {}", e))
+            })?;
+        }
+    }
+
+    let persist_file: IPersistFile = shell_link
+        .cast()
+        .map_err(|e| PlatformError::Os(format!("Gagal cast ShellLink ke IPersistFile: {}", e)))?;
+
+    let mut wide_path: Vec<u16> = shortcut_path.as_os_str().encode_wide().collect();
+    wide_path.push(0);
+
+    // SAFETY: Menyimpan representasi shortcut biner (.lnk) langsung ke sistem berkas.
+    unsafe {
+        persist_file
+            .Save(PCWSTR::from_raw(wide_path.as_ptr()), true)
+            .map_err(|e| PlatformError::Os(format!("Gagal menyimpan file shortcut: {}", e)))?;
+    }
+
+    Ok(())
+}
+
 impl crate::platform::ShortcutCreator for WindowsShortcutCreator {
     fn default_desktop_dir(&self) -> Result<std::path::PathBuf, PlatformError> {
         if let Some(onedrive) = std::env::var_os("OneDrive") {
@@ -436,47 +528,14 @@ impl crate::platform::ShortcutCreator for WindowsShortcutCreator {
         &self,
         spec: &crate::platform::ShortcutSpec,
     ) -> Result<std::path::PathBuf, PlatformError> {
-        std::fs::create_dir_all(&spec.target_dir).map_err(|e| {
-            PlatformError::Os(format!("Gagal membuat folder tujuan shortcut: {}", e))
-        })?;
-
         let shortcut_path = spec.shortcut_path();
-        let app_exe_str = spec.app_executable.to_string_lossy().to_string();
         let args_str = spec.arguments.join(" ");
         let workdir = match spec.app_executable.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-            _ => std::env::current_dir().unwrap_or_else(|_| spec.target_dir.clone()),
+            Some(p) if !p.as_os_str().is_empty() => Some(p),
+            _ => None,
         };
 
-        // Menggunakan script block berparameter (& { param($lnk, $target, $arg, $dir) ... })
-        // agar parameter posisi terikat dengan benar dan bebas dari masalah shell injection atau kutip/spasi.
-        let ps_script = "& { param($lnk, $target, $arg, $dir) $ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut($lnk); $s.TargetPath = $target; $s.Arguments = $arg; $s.WorkingDirectory = $dir; $s.Save() }";
-
-        let output = new_silent_powershell_cmd()
-            .arg("-NoProfile")
-            .arg("-NonInteractive")
-            .arg("-Command")
-            .arg(ps_script)
-            .arg(shortcut_path.to_string_lossy().as_ref())
-            .arg(&app_exe_str)
-            .arg(&args_str)
-            .arg(workdir.to_string_lossy().as_ref())
-            .output()
-            .map_err(|e| {
-                PlatformError::Os(format!(
-                    "Gagal menjalankan powershell untuk membuat shortcut: {}",
-                    e
-                ))
-            })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(PlatformError::Os(format!(
-                "Pembuatan shortcut gagal: {}",
-                stderr
-            )));
-        }
-
+        create_windows_shortcut(&shortcut_path, &spec.app_executable, &args_str, workdir)?;
         Ok(shortcut_path)
     }
 }

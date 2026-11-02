@@ -450,3 +450,18 @@ fn test_manifest_deserialization_with_omitted_installed_at_uses_default() {
     assert!(manifest.installed_at.ends_with('Z'));
     assert!(manifest.shortcuts_created.is_empty());
 }
+
+#[test]
+fn test_shortcut_creation_source_code_does_not_contain_powershell() {
+    let platform_windows = include_str!("../src/platform/windows.rs");
+    let installer = include_str!("../src/installer.rs");
+
+    assert!(
+        !platform_windows.contains("CreateShortcut"),
+        "platform/windows.rs should not use PowerShell WScript.Shell CreateShortcut"
+    );
+    assert!(
+        !installer.contains("CreateShortcut"),
+        "installer.rs should not use PowerShell WScript.Shell CreateShortcut"
+    );
+}
