@@ -11,8 +11,6 @@ mod payload {
 
 use std::env;
 use std::path::PathBuf;
-#[cfg(windows)]
-use window_hop::installer::Arch;
 use window_hop::installer::{
     default_install_dir, install, uninstall, validate_os_baseline, InstallError, InstallOptions,
     OsVersion,
@@ -38,22 +36,7 @@ fn print_help() {
 fn detect_current_os() -> Result<OsVersion, InstallError> {
     #[cfg(windows)]
     {
-        // Deteksi arsitektur via environment PROCESSOR_ARCHITECTURE
-        let arch = match env::var("PROCESSOR_ARCHITECTURE").as_deref() {
-            Ok("AMD64") | Ok("x86_64") => Arch::X64,
-            Ok("x86") => Arch::X86,
-            Ok("ARM64") => Arch::Arm64,
-            _ => Arch::Other,
-        };
-
-        // Mengambil versi Windows via powershell
-        let (major, minor, build) = get_windows_version()?;
-        Ok(OsVersion {
-            major,
-            minor,
-            build,
-            arch,
-        })
+        window_hop::installer::detect_windows_os_version()
     }
 
     #[cfg(not(windows))]
@@ -63,56 +46,6 @@ fn detect_current_os() -> Result<OsVersion, InstallError> {
                 .to_string(),
         ))
     }
-}
-
-#[cfg(windows)]
-fn get_windows_version() -> Result<(u32, u32, u32), InstallError> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-    let script = "& { [System.Environment]::OSVersion.Version.ToString() }";
-    let mut cmd = std::process::Command::new("powershell.exe");
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let output = cmd
-        .arg("-NoProfile")
-        .arg("-NonInteractive")
-        .arg("-Command")
-        .arg(script)
-        .output()
-        .map_err(|e| {
-            InstallError::VerificationFailed(format!(
-                "Gagal menjalankan powershell untuk verifikasi versi Windows: {}",
-                e
-            ))
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(InstallError::VerificationFailed(format!(
-            "Pemeriksaan versi Windows gagal: {}",
-            stderr.trim()
-        )));
-    }
-
-    let s = String::from_utf8_lossy(&output.stdout);
-    let parts: Vec<&str> = s.trim().split('.').collect();
-    if parts.len() >= 3 {
-        let major = parts[0].parse().map_err(|e| {
-            InstallError::VerificationFailed(format!("Gagal mem-parsing nomor major OS: {}", e))
-        })?;
-        let minor = parts[1].parse().map_err(|e| {
-            InstallError::VerificationFailed(format!("Gagal mem-parsing nomor minor OS: {}", e))
-        })?;
-        let build = parts[2].parse().map_err(|e| {
-            InstallError::VerificationFailed(format!("Gagal mem-parsing nomor build OS: {}", e))
-        })?;
-        return Ok((major, minor, build));
-    }
-
-    Err(InstallError::VerificationFailed(format!(
-        "Format versi OS tidak terduga: {}",
-        s.trim()
-    )))
 }
 
 #[cfg(windows)]
