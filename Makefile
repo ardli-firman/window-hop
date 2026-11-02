@@ -140,14 +140,14 @@ installer:
 	@if command -v makensis >/dev/null 2>&1; then \
 		mkdir -p $(DIST_DIR); \
 		cp $(RELEASE_DIR)/window-hop$(EXE_EXT) $(DIST_DIR)/; \
-		cp docs/install-guide.md $(DIST_DIR)/INSTALL-GUIDE.txt; \
+		cp docs/INSTALL-GUIDE.txt $(DIST_DIR)/INSTALL-GUIDE.txt; \
 		echo "==> Compiling NSIS installer $(DIST_DIR)/$(SETUP_EXE)..."; \
 		makensis -DVERSION=$(VERSION) -DTIMESTAMP="$(TIMESTAMP)" installer/installer.nsi; \
 		cp $(DIST_DIR)/$(SETUP_EXE) $(DIST_DIR)/$(SETUP_VERSIONED_EXE); \
 	elif [ -n "$(NSIS_BIN)" ]; then \
 		mkdir -p $(DIST_DIR); \
 		cp $(RELEASE_DIR)/window-hop$(EXE_EXT) $(DIST_DIR)/; \
-		cp docs/install-guide.md $(DIST_DIR)/INSTALL-GUIDE.txt; \
+		cp docs/INSTALL-GUIDE.txt $(DIST_DIR)/INSTALL-GUIDE.txt; \
 		echo "==> Compiling NSIS installer $(DIST_DIR)/$(SETUP_EXE)..."; \
 		"$(NSIS_BIN)" -DVERSION=$(VERSION) -DTIMESTAMP="$(TIMESTAMP)" installer/installer.nsi; \
 		cp $(DIST_DIR)/$(SETUP_EXE) $(DIST_DIR)/$(SETUP_VERSIONED_EXE); \
@@ -162,7 +162,7 @@ package: release
 	@mkdir -p $(DIST_DIR)
 	@cp $(RELEASE_DIR)/window-hop$(EXE_EXT) $(DIST_DIR)/
 	@cp $(RELEASE_DIR)/window-hop-installer$(EXE_EXT) $(DIST_DIR)/
-	@cp docs/install-guide.md $(DIST_DIR)/INSTALL-GUIDE.txt
+	@cp docs/INSTALL-GUIDE.txt $(DIST_DIR)/INSTALL-GUIDE.txt
 	@if command -v makensis >/dev/null 2>&1; then \
 		echo "==> Compiling NSIS installer $(DIST_DIR)/$(SETUP_EXE)..."; \
 		makensis -DVERSION=$(VERSION) -DTIMESTAMP="$(TIMESTAMP)" installer/installer.nsi; \
@@ -195,7 +195,7 @@ package-dev: build-dev
 	@mkdir -p $(DIST_DIR)
 	@cp $(DEBUG_DIR)/window-hop$(EXE_EXT) $(DIST_DIR)/
 	@cp $(DEBUG_DIR)/window-hop-installer$(EXE_EXT) $(DIST_DIR)/
-	@cp docs/install-guide.md $(DIST_DIR)/INSTALL-GUIDE.txt
+	@cp docs/INSTALL-GUIDE.txt $(DIST_DIR)/INSTALL-GUIDE.txt
 	@echo "==> Creating development archive $(DIST_DIR)/$(PORTABLE_ZIP)..."
 	@cd $(DIST_DIR) && \
 	if command -v zip >/dev/null 2>&1; then \
