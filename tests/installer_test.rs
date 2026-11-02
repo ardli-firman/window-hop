@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use window_hop::application::LifecycleCoordinator;
 use window_hop::domain::DraftProfileInput;
 use window_hop::installer::{
-    default_install_dir, install, is_dev_build_path, resolve_installed_app_executable, uninstall,
-    validate_os_baseline, verify_installation, Arch, InstallError, InstallManifest, InstallOptions,
-    OsVersion,
+    default_install_dir, install, is_dev_build_path, parse_version_string_major_minor,
+    resolve_installed_app_executable, uninstall, validate_os_baseline, verify_installation, Arch,
+    InstallError, InstallManifest, InstallOptions, OsVersion,
 };
 use window_hop::persistence::FileProfileStore;
 use window_hop::platform::{MockShortcutCreator, MockStartupManager};
@@ -515,4 +515,45 @@ fn test_registry_operations_source_code_does_not_contain_powershell() {
         !installer.contains("HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion"),
         "installer.rs should not use PowerShell HKCU registry paths"
     );
+}
+
+#[test]
+fn test_browser_detector_source_code_does_not_contain_powershell() {
+    let platform_windows = include_str!("../src/platform/windows.rs");
+
+    assert!(
+        !platform_windows.contains("new_silent_powershell_cmd"),
+        "platform/windows.rs should not contain new_silent_powershell_cmd helper"
+    );
+    assert!(
+        !platform_windows.contains("powershell"),
+        "platform/windows.rs should not contain any powershell reference"
+    );
+    assert!(
+        !platform_windows.contains("Get-ChildItem"),
+        "platform/windows.rs should not contain PowerShell Get-ChildItem cmdlet"
+    );
+}
+
+#[test]
+fn test_installer_binary_source_code_does_not_contain_powershell() {
+    let installer_bin = include_str!("../src/bin/installer.rs");
+
+    assert!(
+        !installer_bin.contains("powershell"),
+        "src/bin/installer.rs should not contain any powershell reference"
+    );
+    assert!(
+        !installer_bin.contains("CREATE_NO_WINDOW"),
+        "src/bin/installer.rs should not spawn hidden powershell command with CREATE_NO_WINDOW"
+    );
+}
+
+#[test]
+fn test_parse_version_string_major_minor() {
+    assert_eq!(parse_version_string_major_minor("10.0").unwrap(), (10, 0));
+    assert_eq!(parse_version_string_major_minor("6.3").unwrap(), (6, 3));
+    assert_eq!(parse_version_string_major_minor("6.1").unwrap(), (6, 1));
+    assert_eq!(parse_version_string_major_minor("10").unwrap(), (10, 0));
+    assert!(parse_version_string_major_minor("invalid").is_err());
 }

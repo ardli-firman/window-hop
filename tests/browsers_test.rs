@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 use window_hop::browsers::{
-    detect_browser_support, evaluate_browser_compatibility, is_brave_executable,
-    is_firefox_executable, parse_windows_command_line, read_executable_architecture, BraveAdapter,
-    BrowserAdapter, BrowserArchitecture, BrowserCompatibilityStatus, BrowserError,
-    BrowserSupportStatus, ChromeAdapter, DetectedBrowser, EdgeAdapter, FirefoxAdapter,
-    LaunchParameters, LoginRetentionNote,
+    detect_browser_support, evaluate_browser_compatibility, extract_browser_executable_path,
+    is_brave_executable, is_firefox_executable, parse_windows_command_line,
+    read_executable_architecture, BraveAdapter, BrowserAdapter, BrowserArchitecture,
+    BrowserCompatibilityStatus, BrowserError, BrowserSupportStatus, ChromeAdapter, DetectedBrowser,
+    EdgeAdapter, FirefoxAdapter, LaunchParameters, LoginRetentionNote,
 };
 
 #[test]
@@ -786,6 +786,50 @@ fn test_read_executable_architecture_pe_header() {
         read_executable_architecture(&corrupt_file),
         BrowserArchitecture::Unknown
     );
+}
+
+#[test]
+fn test_extract_browser_executable_path_handles_various_registry_command_formats() {
+    // 1. Quoted path with arguments
+    let cmd1 = r#""C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" -- "%1""#;
+    assert_eq!(
+        extract_browser_executable_path(cmd1),
+        Some(PathBuf::from(
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+        ))
+    );
+
+    // 2. Quoted path without arguments
+    let cmd2 = r#""C:\Program Files\Google\Chrome\Application\chrome.exe""#;
+    assert_eq!(
+        extract_browser_executable_path(cmd2),
+        Some(PathBuf::from(
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        ))
+    );
+
+    // 3. Unquoted path with arguments
+    let cmd3 = r#"C:\Program Files\Mozilla Firefox\firefox.exe -os-int -url "%1""#;
+    assert_eq!(
+        extract_browser_executable_path(cmd3),
+        Some(PathBuf::from(
+            r"C:\Program Files\Mozilla Firefox\firefox.exe"
+        ))
+    );
+
+    // 4. Unquoted path without arguments
+    let cmd4 =
+        r#"C:\Users\Perawat\AppData\Local\BraveSoftware\Brave-Browser\Application\brave.exe"#;
+    assert_eq!(
+        extract_browser_executable_path(cmd4),
+        Some(PathBuf::from(
+            r"C:\Users\Perawat\AppData\Local\BraveSoftware\Brave-Browser\Application\brave.exe"
+        ))
+    );
+
+    // 5. Empty or whitespace
+    assert_eq!(extract_browser_executable_path(""), None);
+    assert_eq!(extract_browser_executable_path("   "), None);
 }
 
 #[test]

@@ -107,6 +107,44 @@ fn escape_and_quote_arg(val: &str) -> String {
     format!("\"{}\"", escaped)
 }
 
+/// Mengekstrak path executable browser dari string perintah registri (misal `shell\open\command`).
+/// Menangani path berpetik, path tanpa petik dengan argumen, maupun path standar.
+pub fn extract_browser_executable_path(command: &str) -> Option<PathBuf> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // 1. Path berpetik: "C:\Program Files\...\browser.exe" ...
+    if let Some(rest) = trimmed.strip_prefix('"') {
+        if let Some(end_quote) = rest.find('"') {
+            let path_str = rest[..end_quote].trim();
+            if !path_str.is_empty() {
+                return Some(PathBuf::from(path_str));
+            }
+        }
+    }
+
+    // 2. Path tanpa petik yang mengandung ekstensi .exe
+    let lower = trimmed.to_lowercase();
+    if let Some(pos) = lower.find(".exe") {
+        let candidate = &trimmed[..pos + 4];
+        let path_str = candidate.trim().trim_matches('"');
+        if !path_str.is_empty() {
+            return Some(PathBuf::from(path_str));
+        }
+    }
+
+    // 3. Fallback: kata pertama yang dipisahkan spasi atau seluruh string
+    let token = trimmed.split_whitespace().next().unwrap_or(trimmed);
+    let path_str = token.trim_matches('"');
+    if !path_str.is_empty() {
+        Some(PathBuf::from(path_str))
+    } else {
+        None
+    }
+}
+
 /// Parameter peluncuran yang dipetakan secara dua arah (bi-directional) antara field
 /// domain `custom_parameters` dengan UI form: URL antrian, switch kiosk, dan parameter tingkat lanjut.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

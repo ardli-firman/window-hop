@@ -83,6 +83,136 @@ pub fn validate_os_baseline(os: &OsVersion) -> Result<(), InstallError> {
     Ok(())
 }
 
+/// Mem-parsing string versi mayor dan minor (misal "10.0", "6.3", "6.1").
+pub fn parse_version_string_major_minor(ver: &str) -> Result<(u32, u32), InstallError> {
+    let parts: Vec<&str> = ver.trim().split('.').collect();
+    if parts.len() >= 2 {
+        let major = parts[0].parse::<u32>().map_err(|e| {
+            InstallError::VerificationFailed(format!("Format major versi OS tidak valid: {}", e))
+        })?;
+        let minor = parts[1].parse::<u32>().map_err(|e| {
+            InstallError::VerificationFailed(format!("Format minor versi OS tidak valid: {}", e))
+        })?;
+        Ok((major, minor))
+    } else if let Ok(major) = ver.trim().parse::<u32>() {
+        Ok((major, 0))
+    } else {
+        Err(InstallError::VerificationFailed(format!(
+            "Format string versi OS tidak terduga: '{}'",
+            ver
+        )))
+    }
+}
+
+/// Mendeteksi arsitektur prosesor OS Windows secara native via GetNativeSystemInfo dan environment fallback.
+#[cfg(windows)]
+pub fn detect_windows_arch() -> Arch {
+    use windows::Win32::System::SystemInformation::{
+        GetNativeSystemInfo, PROCESSOR_ARCHITECTURE_AMD64, PROCESSOR_ARCHITECTURE_ARM64,
+        PROCESSOR_ARCHITECTURE_INTEL, SYSTEM_INFO,
+    };
+
+    let mut info = SYSTEM_INFO::default();
+    unsafe { GetNativeSystemInfo(&mut info) };
+    let arch_code = unsafe { info.Anonymous.Anonymous.wProcessorArchitecture };
+
+    if arch_code == PROCESSOR_ARCHITECTURE_AMD64 {
+        Arch::X64
+    } else if arch_code == PROCESSOR_ARCHITECTURE_ARM64 {
+        Arch::Arm64
+    } else if arch_code == PROCESSOR_ARCHITECTURE_INTEL {
+        Arch::X86
+    } else {
+        // Fallback ke environment variables
+        if let Ok(arch) = std::env::var("PROCESSOR_ARCHITEW6432") {
+            match arch.to_uppercase().as_str() {
+                "AMD64" | "X86_64" => return Arch::X64,
+                "ARM64" => return Arch::Arm64,
+                _ => {}
+            }
+        }
+        if let Ok(arch) = std::env::var("PROCESSOR_ARCHITECTURE") {
+            match arch.to_uppercase().as_str() {
+                "AMD64" | "X86_64" => return Arch::X64,
+                "ARM64" => return Arch::Arm64,
+                "X86" => return Arch::X86,
+                _ => {}
+            }
+        }
+        Arch::Other
+    }
+}
+
+/// Mendeteksi versi dan arsitektur OS Windows secara native via pembacaan registry CurrentVersion secara langsung.
+#[cfg(windows)]
+pub fn detect_windows_os_version() -> Result<OsVersion, InstallError> {
+    use windows::core::w;
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ};
+
+    let arch = detect_windows_arch();
+
+    let mut hkey = HKEY::default();
+    let res = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"),
+            None,
+            KEY_READ,
+            &mut hkey,
+        )
+    };
+
+    if res != ERROR_SUCCESS {
+        return Err(InstallError::VerificationFailed(format!(
+            "Gagal membaca registry Windows NT CurrentVersion (kode error: {})",
+            res.0
+        )));
+    }
+    let _guard = crate::platform::windows::RegKey(hkey);
+
+    // 1. Coba baca CurrentMajorVersionNumber dan CurrentMinorVersionNumber (Windows 10/11)
+    let major_opt =
+        crate::platform::windows::query_registry_dword(hkey, "CurrentMajorVersionNumber");
+    let minor_opt =
+        crate::platform::windows::query_registry_dword(hkey, "CurrentMinorVersionNumber");
+
+    let (major, minor) = if let (Some(maj), Some(min)) = (major_opt, minor_opt) {
+        (maj, min)
+    } else if let Some(ver_str) =
+        crate::platform::windows::query_registry_string(hkey, Some("CurrentVersion"))
+    {
+        // Fallback untuk Windows versi lama (Windows 7/8/8.1)
+        parse_version_string_major_minor(&ver_str)?
+    } else {
+        (10, 0)
+    };
+
+    // 2. Baca nomor build (CurrentBuildNumber atau CurrentBuild)
+    let build_str =
+        crate::platform::windows::query_registry_string(hkey, Some("CurrentBuildNumber"))
+            .or_else(|| crate::platform::windows::query_registry_string(hkey, Some("CurrentBuild")))
+            .ok_or_else(|| {
+                InstallError::VerificationFailed(
+                    "Nilai CurrentBuildNumber tidak ditemukan di registry".to_string(),
+                )
+            })?;
+
+    let build = build_str.parse::<u32>().map_err(|e| {
+        InstallError::VerificationFailed(format!(
+            "Gagal mem-parsing nomor build OS '{}': {}",
+            build_str, e
+        ))
+    })?;
+
+    Ok(OsVersion {
+        major,
+        minor,
+        build,
+        arch,
+    })
+}
+
 /// Mengembalikan lokasi direktori instalasi konsisten default untuk Window Hop.
 ///
 /// Pada platform Windows, ini mengarah ke `%LOCALAPPDATA%\Programs\Window Hop`.

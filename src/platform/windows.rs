@@ -6,21 +6,10 @@ use crate::platform::{
     BrowserDetector, DetectedBrowser, ManagedProcess, MonitorProvider, PlatformError,
     ProcessLauncher, StartupManager, TrayAction, TrayActionHandler, TrayProvider,
 };
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-#[cfg(windows)]
-pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-#[cfg(windows)]
-pub(crate) fn new_silent_powershell_cmd() -> Command {
-    let mut cmd = Command::new("powershell.exe");
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    cmd
-}
 use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -868,7 +857,7 @@ impl Drop for WindowsTrayProvider {
     }
 }
 
-struct RegKey(windows::Win32::System::Registry::HKEY);
+pub(crate) struct RegKey(pub(crate) windows::Win32::System::Registry::HKEY);
 
 impl Drop for RegKey {
     fn drop(&mut self) {
@@ -880,10 +869,107 @@ impl Drop for RegKey {
     }
 }
 
-fn to_wide(s: &str) -> Vec<u16> {
+pub(crate) fn to_wide(s: &str) -> Vec<u16> {
     let mut v: Vec<u16> = s.encode_utf16().collect();
     v.push(0);
     v
+}
+
+/// Helper untuk membaca nilai string (REG_SZ / REG_EXPAND_SZ) dari registry Win32.
+/// Jika `value_name` adalah None, akan membaca nilai default key.
+#[cfg(windows)]
+pub(crate) fn query_registry_string(
+    hkey: windows::Win32::System::Registry::HKEY,
+    value_name: Option<&str>,
+) -> Option<String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{
+        RegQueryValueExW, REG_EXPAND_SZ, REG_SZ, REG_VALUE_TYPE,
+    };
+
+    let wide_name = value_name.map(to_wide);
+    let lp_value = match &wide_name {
+        Some(v) => PCWSTR(v.as_ptr()),
+        None => PCWSTR::null(),
+    };
+
+    let mut val_type = REG_VALUE_TYPE::default();
+    let mut data_len = 0u32;
+
+    let status = unsafe {
+        RegQueryValueExW(
+            hkey,
+            lp_value,
+            None,
+            Some(&mut val_type),
+            None,
+            Some(&mut data_len),
+        )
+    };
+    if status != ERROR_SUCCESS || (val_type != REG_SZ && val_type != REG_EXPAND_SZ) || data_len == 0
+    {
+        return None;
+    }
+
+    let u16_count = (data_len as usize) / 2;
+    let mut buffer: Vec<u16> = vec![0; u16_count];
+    let status = unsafe {
+        RegQueryValueExW(
+            hkey,
+            lp_value,
+            None,
+            Some(&mut val_type),
+            Some(buffer.as_mut_ptr() as *mut u8),
+            Some(&mut data_len),
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return None;
+    }
+
+    while let Some(&0) = buffer.last() {
+        buffer.pop();
+    }
+    let s = String::from_utf16_lossy(&buffer);
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Helper untuk membaca nilai DWORD (REG_DWORD / u32) dari registry Win32.
+#[cfg(windows)]
+pub(crate) fn query_registry_dword(
+    hkey: windows::Win32::System::Registry::HKEY,
+    value_name: &str,
+) -> Option<u32> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{RegQueryValueExW, REG_DWORD, REG_VALUE_TYPE};
+
+    let wide_name = to_wide(value_name);
+    let mut val_type = REG_VALUE_TYPE::default();
+    let mut val: u32 = 0;
+    let mut data_len = std::mem::size_of::<u32>() as u32;
+
+    let status = unsafe {
+        RegQueryValueExW(
+            hkey,
+            PCWSTR(wide_name.as_ptr()),
+            None,
+            Some(&mut val_type),
+            Some(&mut val as *mut u32 as *mut u8),
+            Some(&mut data_len),
+        )
+    };
+    if status == ERROR_SUCCESS && val_type == REG_DWORD {
+        Some(val)
+    } else {
+        None
+    }
 }
 
 /// Memeriksa apakah aplikasi terdaftar di registry startup Windows Run key.
@@ -1276,68 +1362,127 @@ impl BrowserDetector for WindowsBrowserDetector {
             }
         }
 
-        // 2. PowerShell / Registry query for StartMenuInternet clients
-        let ps_script = r#"& {
-            $keys = @('HKLM:\SOFTWARE\Clients\StartMenuInternet', 'HKCU:\SOFTWARE\Clients\StartMenuInternet')
-            foreach ($k in $keys) {
-                if (Test-Path $k) {
-                    Get-ChildItem -Path $k -ErrorAction SilentlyContinue | ForEach-Object {
-                        $name = $_.GetValue('')
-                        $cmd = (Get-ItemProperty -Path "$($_.PSPath)\shell\open\command" -ErrorAction SilentlyContinue).'(default)'
-                        if ($cmd) {
-                            $cleanPath = $cmd.Trim().Trim('"')
-                            if ($cleanPath -match '^[a-zA-Z]:\\[^"]+\.exe') {
-                                $cleanPath = $matches[0]
-                            }
-                            if (Test-Path $cleanPath) {
-                                Write-Output "$name|$cleanPath"
-                            }
-                        }
-                    }
-                }
-            }
-        }"#;
+        // 2. Native Win32 Registry scanning for StartMenuInternet clients in HKLM and HKCU
+        scan_start_menu_internet_root(
+            windows::Win32::System::Registry::HKEY_LOCAL_MACHINE,
+            &mut candidates,
+        );
+        scan_start_menu_internet_root(
+            windows::Win32::System::Registry::HKEY_CURRENT_USER,
+            &mut candidates,
+        );
 
-        let mut cmd = new_silent_powershell_cmd();
+        Ok(crate::platform::deduplicate_detected_browsers(candidates))
+    }
+}
 
-        if let Ok(output) = cmd
-            .arg("-NoProfile")
-            .arg("-NonInteractive")
-            .arg("-Command")
-            .arg(ps_script)
-            .output()
-        {
-            if output.status.success() {
-                let text = String::from_utf8_lossy(&output.stdout);
-                for line in text.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    if let Some((name_part, path_part)) = trimmed.split_once('|') {
-                        let path = std::path::PathBuf::from(path_part.trim());
-                        if path.exists() && path.is_file() {
-                            let arch = read_executable_architecture(&path);
-                            let version = crate::browsers::read_installed_browser_version(&path);
-                            let display_name = if name_part.trim().is_empty() {
-                                path.file_stem()
-                                    .map(|s| s.to_string_lossy().to_string())
-                                    .unwrap_or_else(|| "Browser".to_string())
-                            } else {
-                                name_part.trim().to_string()
-                            };
-                            candidates.push(DetectedBrowser {
-                                name: display_name,
-                                executable_path: path,
-                                version,
-                                architecture: arch,
-                            });
-                        }
-                    }
+#[cfg(windows)]
+fn scan_start_menu_internet_root(
+    root: windows::Win32::System::Registry::HKEY,
+    candidates: &mut Vec<DetectedBrowser>,
+) {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{RegEnumKeyExW, RegOpenKeyExW, HKEY, KEY_READ};
+
+    let sub_key_wide = to_wide(r"SOFTWARE\Clients\StartMenuInternet");
+    let mut h_start_menu = HKEY::default();
+    let status = unsafe {
+        RegOpenKeyExW(
+            root,
+            PCWSTR(sub_key_wide.as_ptr()),
+            None,
+            KEY_READ,
+            &mut h_start_menu,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return;
+    }
+    let start_menu_guard = RegKey(h_start_menu);
+
+    let mut index = 0u32;
+    loop {
+        let mut subkey_name = [0u16; 256];
+        let mut name_len = subkey_name.len() as u32;
+        let enum_res = unsafe {
+            RegEnumKeyExW(
+                start_menu_guard.0,
+                index,
+                Some(windows::core::PWSTR(subkey_name.as_mut_ptr())),
+                &mut name_len,
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        if enum_res != ERROR_SUCCESS {
+            break;
+        }
+        index += 1;
+
+        let client_key_name = String::from_utf16_lossy(&subkey_name[..name_len as usize]);
+
+        // Open StartMenuInternet\<client_key_name>
+        let client_rel_path = to_wide(&client_key_name);
+        let mut h_client = HKEY::default();
+        let client_open = unsafe {
+            RegOpenKeyExW(
+                start_menu_guard.0,
+                PCWSTR(client_rel_path.as_ptr()),
+                None,
+                KEY_READ,
+                &mut h_client,
+            )
+        };
+        if client_open != ERROR_SUCCESS {
+            continue;
+        }
+        let client_guard = RegKey(h_client);
+
+        // Read default value of <client_key_name> for display name
+        let display_name =
+            query_registry_string(client_guard.0, None).unwrap_or_else(|| client_key_name.clone());
+
+        // Open shell\open\command under <client_key_name>
+        let cmd_rel_path = to_wide(r"shell\open\command");
+        let mut h_cmd = HKEY::default();
+        let cmd_open = unsafe {
+            RegOpenKeyExW(
+                client_guard.0,
+                PCWSTR(cmd_rel_path.as_ptr()),
+                None,
+                KEY_READ,
+                &mut h_cmd,
+            )
+        };
+        if cmd_open != ERROR_SUCCESS {
+            continue;
+        }
+        let cmd_guard = RegKey(h_cmd);
+
+        // Read default value of shell\open\command
+        if let Some(cmd_str) = query_registry_string(cmd_guard.0, None) {
+            if let Some(path) = crate::browsers::extract_browser_executable_path(&cmd_str) {
+                if path.exists() && path.is_file() {
+                    let arch = read_executable_architecture(&path);
+                    let version = crate::browsers::read_installed_browser_version(&path);
+                    let name = if display_name.trim().is_empty() {
+                        path.file_stem()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "Browser".to_string())
+                    } else {
+                        display_name.trim().to_string()
+                    };
+                    candidates.push(DetectedBrowser {
+                        name,
+                        executable_path: path,
+                        version,
+                        architecture: arch,
+                    });
                 }
             }
         }
-
-        Ok(crate::platform::deduplicate_detected_browsers(candidates))
     }
 }
