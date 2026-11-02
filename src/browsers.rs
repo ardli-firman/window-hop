@@ -126,7 +126,7 @@ pub fn extract_browser_executable_path(command: &str) -> Option<PathBuf> {
     }
 
     // 2. Path tanpa petik yang mengandung ekstensi .exe
-    let lower = trimmed.to_lowercase();
+    let lower = trimmed.to_ascii_lowercase();
     if let Some(pos) = lower.find(".exe") {
         let candidate = &trimmed[..pos + 4];
         let path_str = candidate.trim().trim_matches('"');

@@ -907,13 +907,14 @@ pub(crate) fn query_registry_string(
             Some(&mut data_len),
         )
     };
-    if status != ERROR_SUCCESS || (val_type != REG_SZ && val_type != REG_EXPAND_SZ) || data_len == 0
+    if status != ERROR_SUCCESS || (val_type != REG_SZ && val_type != REG_EXPAND_SZ) || data_len < 2
     {
         return None;
     }
 
-    let u16_count = (data_len as usize) / 2;
+    let u16_count = (data_len as usize).div_ceil(2);
     let mut buffer: Vec<u16> = vec![0; u16_count];
+    let mut bytes_capacity = (u16_count * std::mem::size_of::<u16>()) as u32;
     let status = unsafe {
         RegQueryValueExW(
             hkey,
@@ -921,11 +922,29 @@ pub(crate) fn query_registry_string(
             None,
             Some(&mut val_type),
             Some(buffer.as_mut_ptr() as *mut u8),
-            Some(&mut data_len),
+            Some(&mut bytes_capacity),
         )
     };
     if status != ERROR_SUCCESS {
         return None;
+    }
+
+    // Pastikan buffer memiliki null-terminator jika terpotong
+    if !buffer.contains(&0) {
+        buffer.push(0);
+    }
+
+    if val_type == REG_EXPAND_SZ {
+        use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
+        let req_len = unsafe { ExpandEnvironmentStringsW(PCWSTR(buffer.as_ptr()), None) };
+        if req_len > 0 {
+            let mut expanded: Vec<u16> = vec![0; req_len as usize];
+            let res =
+                unsafe { ExpandEnvironmentStringsW(PCWSTR(buffer.as_ptr()), Some(&mut expanded)) };
+            if res > 0 {
+                buffer = expanded;
+            }
+        }
     }
 
     while let Some(&0) = buffer.last() {
