@@ -14,6 +14,10 @@
   !define VERSION "0.1.2"
 !endif
 
+!ifndef TIMESTAMP
+  !define TIMESTAMP "2026-11-02T00:00:00Z"
+!endif
+
 !ifndef OUTFILE
   !define OUTFILE "..\dist\WindowHop-Setup.exe"
 !endif
@@ -46,6 +50,29 @@ RequestExecutionLevel user
 !insertmacro MUI_LANGUAGE "Indonesian"
 !insertmacro MUI_LANGUAGE "English"
 
+Function EscapeJsonPath
+    Exch $R0
+    Push $R1
+    Push $R2
+    StrCpy $R1 ""
+    Loop:
+        StrCpy $R2 $R0 1
+        StrCmp $R2 "" Done
+        StrCmp $R2 "\" Slash
+        StrCpy $R1 "$R1$R2"
+        Goto Next
+    Slash:
+        StrCpy $R1 "$R1/"
+    Next:
+        StrCpy $R0 $R0 "" 1
+        Goto Loop
+    Done:
+    StrCpy $R0 $R1
+    Pop $R2
+    Pop $R1
+    Exch $R0
+FunctionEnd
+
 Section "Install"
     ; 1. Verifikasi Arsitektur Sistem Operasi (Wajib 64-bit x64 sesuai ADR 0002)
     ${IfNot} ${IsNativeAMD64}
@@ -60,24 +87,37 @@ Section "Install"
     File "..\dist\window-hop.exe"
     File "..\dist\INSTALL-GUIDE.txt"
 
-    ; 4. Tulis manifest instalasi (install-manifest.json)
+    ; 4. Tulis manifest instalasi (install-manifest.json) dengan format JSON yang valid
+    Push "$INSTDIR"
+    Call EscapeJsonPath
+    Pop $R0
+
+    Push "$SMPROGRAMS\Window Hop"
+    Call EscapeJsonPath
+    Pop $R1
+
+    Push "$DESKTOP"
+    Call EscapeJsonPath
+    Pop $R2
+
     FileOpen $0 "$INSTDIR\install-manifest.json" w
-    FileWrite $0 '{\n'
-    FileWrite $0 '  "app_name": "Window Hop",\n'
-    FileWrite $0 '  "version": "${VERSION}",\n'
-    FileWrite $0 '  "installed_exe": "$INSTDIR\\window-hop.exe",\n'
-    FileWrite $0 '  "installed_files": [\n'
-    FileWrite $0 '    "$INSTDIR\\window-hop.exe",\n'
-    FileWrite $0 '    "$INSTDIR\\INSTALL-GUIDE.txt",\n'
-    FileWrite $0 '    "$INSTDIR\\install-manifest.json",\n'
-    FileWrite $0 '    "$INSTDIR\\uninstall.exe"\n'
-    FileWrite $0 '  ],\n'
-    FileWrite $0 '  "shortcuts_created": [\n'
-    FileWrite $0 '    "$SMPROGRAMS\\Window Hop\\Window Hop.lnk",\n'
-    FileWrite $0 '    "$SMPROGRAMS\\Window Hop\\Uninstall Window Hop.lnk",\n'
-    FileWrite $0 '    "$DESKTOP\\Window Hop.lnk"\n'
-    FileWrite $0 '  ]\n'
-    FileWrite $0 '}\n'
+    FileWrite $0 "{$\r$\n"
+    FileWrite $0 '  "app_name": "Window Hop",$\r$\n'
+    FileWrite $0 '  "version": "${VERSION}",$\r$\n'
+    FileWrite $0 '  "installed_exe": "$R0/window-hop.exe",$\r$\n'
+    FileWrite $0 '  "installed_files": [$\r$\n'
+    FileWrite $0 '    "$R0/window-hop.exe",$\r$\n'
+    FileWrite $0 '    "$R0/INSTALL-GUIDE.txt",$\r$\n'
+    FileWrite $0 '    "$R0/install-manifest.json",$\r$\n'
+    FileWrite $0 '    "$R0/uninstall.exe"$\r$\n'
+    FileWrite $0 '  ],$\r$\n'
+    FileWrite $0 '  "installed_at": "${TIMESTAMP}",$\r$\n'
+    FileWrite $0 '  "shortcuts_created": [$\r$\n'
+    FileWrite $0 '    "$R1/Window Hop.lnk",$\r$\n'
+    FileWrite $0 '    "$R1/Uninstall Window Hop.lnk",$\r$\n'
+    FileWrite $0 '    "$R2/Window Hop.lnk"$\r$\n'
+    FileWrite $0 '  ]$\r$\n'
+    FileWrite $0 "}$\r$\n"
     FileClose $0
 
     ; 5. Buat Shortcut pada Start Menu

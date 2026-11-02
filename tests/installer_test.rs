@@ -4,7 +4,8 @@ use window_hop::application::LifecycleCoordinator;
 use window_hop::domain::DraftProfileInput;
 use window_hop::installer::{
     default_install_dir, install, is_dev_build_path, resolve_installed_app_executable, uninstall,
-    validate_os_baseline, verify_installation, Arch, InstallError, InstallOptions, OsVersion,
+    validate_os_baseline, verify_installation, Arch, InstallError, InstallManifest, InstallOptions,
+    OsVersion,
 };
 use window_hop::persistence::FileProfileStore;
 use window_hop::platform::{MockShortcutCreator, MockStartupManager};
@@ -398,4 +399,54 @@ fn test_uninstall_removes_installed_files_and_cleans_directory() {
     );
     assert!(receipt.success);
     assert!(receipt.uninstalled_files.len() >= 3);
+}
+
+#[test]
+fn test_manifest_with_forward_slashes_and_shortcuts_parses_cleanly() {
+    let temp = tempfile::tempdir().unwrap();
+    let install_dir = temp.path().join("Window Hop");
+    fs::create_dir_all(&install_dir).unwrap();
+
+    let exe = install_dir.join("window-hop.exe");
+    fs::write(&exe, b"MZ_PE").unwrap();
+
+    let manifest_content = r#"{
+  "app_name": "Window Hop",
+  "version": "0.1.2",
+  "installed_exe": "C:/Users/Perawat/AppData/Local/Programs/Window Hop/window-hop.exe",
+  "installed_files": [
+    "C:/Users/Perawat/AppData/Local/Programs/Window Hop/window-hop.exe",
+    "C:/Users/Perawat/AppData/Local/Programs/Window Hop/INSTALL-GUIDE.txt",
+    "C:/Users/Perawat/AppData/Local/Programs/Window Hop/install-manifest.json",
+    "C:/Users/Perawat/AppData/Local/Programs/Window Hop/uninstall.exe"
+  ],
+  "installed_at": "2026-11-02T00:00:00Z",
+  "shortcuts_created": [
+    "C:/Users/Perawat/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Window Hop/Window Hop.lnk",
+    "C:/Users/Perawat/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Window Hop/Uninstall Window Hop.lnk",
+    "C:/Users/Perawat/Desktop/Window Hop.lnk"
+  ]
+}"#;
+    fs::write(install_dir.join("install-manifest.json"), manifest_content).unwrap();
+
+    let receipt =
+        verify_installation(&install_dir).expect("Verification should succeed for JSON manifest");
+    assert_eq!(receipt.version, "0.1.2");
+    assert_eq!(receipt.shortcuts_created.len(), 3);
+    assert_eq!(receipt.installed_files.len(), 4);
+}
+
+#[test]
+fn test_manifest_deserialization_with_omitted_installed_at_uses_default() {
+    let manifest_json = r#"{
+  "app_name": "Window Hop",
+  "version": "0.1.2",
+  "installed_exe": "C:/Programs/Window Hop/window-hop.exe",
+  "installed_files": ["C:/Programs/Window Hop/window-hop.exe"]
+}"#;
+    let manifest: InstallManifest = serde_json::from_str(manifest_json).unwrap();
+    assert_eq!(manifest.app_name, "Window Hop");
+    assert!(!manifest.installed_at.is_empty());
+    assert!(manifest.installed_at.ends_with('Z'));
+    assert!(manifest.shortcuts_created.is_empty());
 }

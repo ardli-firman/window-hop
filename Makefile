@@ -10,6 +10,7 @@ SHELL := /bin/bash
 
 # Extract current project version directly from Cargo.toml (pure shell, instant)
 VERSION ?= $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+TIMESTAMP ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 # Target triple configuration (e.g. x86_64-pc-windows-msvc or empty for host)
 TARGET ?=
@@ -141,14 +142,14 @@ installer:
 		cp $(RELEASE_DIR)/window-hop$(EXE_EXT) $(DIST_DIR)/; \
 		cp docs/install-guide.md $(DIST_DIR)/INSTALL-GUIDE.txt; \
 		echo "==> Compiling NSIS installer $(DIST_DIR)/$(SETUP_EXE)..."; \
-		makensis -DVERSION=$(VERSION) installer/installer.nsi; \
+		makensis -DVERSION=$(VERSION) -DTIMESTAMP="$(TIMESTAMP)" installer/installer.nsi; \
 		cp $(DIST_DIR)/$(SETUP_EXE) $(DIST_DIR)/$(SETUP_VERSIONED_EXE); \
 	elif [ -n "$(NSIS_BIN)" ]; then \
 		mkdir -p $(DIST_DIR); \
 		cp $(RELEASE_DIR)/window-hop$(EXE_EXT) $(DIST_DIR)/; \
 		cp docs/install-guide.md $(DIST_DIR)/INSTALL-GUIDE.txt; \
 		echo "==> Compiling NSIS installer $(DIST_DIR)/$(SETUP_EXE)..."; \
-		"$(NSIS_BIN)" -DVERSION=$(VERSION) installer/installer.nsi; \
+		"$(NSIS_BIN)" -DVERSION=$(VERSION) -DTIMESTAMP="$(TIMESTAMP)" installer/installer.nsi; \
 		cp $(DIST_DIR)/$(SETUP_EXE) $(DIST_DIR)/$(SETUP_VERSIONED_EXE); \
 	fi
 
@@ -164,11 +165,11 @@ package: release
 	@cp docs/install-guide.md $(DIST_DIR)/INSTALL-GUIDE.txt
 	@if command -v makensis >/dev/null 2>&1; then \
 		echo "==> Compiling NSIS installer $(DIST_DIR)/$(SETUP_EXE)..."; \
-		makensis -DVERSION=$(VERSION) installer/installer.nsi; \
+		makensis -DVERSION=$(VERSION) -DTIMESTAMP="$(TIMESTAMP)" installer/installer.nsi; \
 		cp $(DIST_DIR)/$(SETUP_EXE) $(DIST_DIR)/$(SETUP_VERSIONED_EXE); \
 	elif [ -n "$(NSIS_BIN)" ]; then \
 		echo "==> Compiling NSIS installer $(DIST_DIR)/$(SETUP_EXE)..."; \
-		"$(NSIS_BIN)" -DVERSION=$(VERSION) installer/installer.nsi; \
+		"$(NSIS_BIN)" -DVERSION=$(VERSION) -DTIMESTAMP="$(TIMESTAMP)" installer/installer.nsi; \
 		cp $(DIST_DIR)/$(SETUP_EXE) $(DIST_DIR)/$(SETUP_VERSIONED_EXE); \
 	else \
 		echo "==> makensis not found, skipping NSIS setup compiler. Bundled window-hop-installer$(EXE_EXT) is available."; \
