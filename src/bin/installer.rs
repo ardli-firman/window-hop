@@ -10,7 +10,6 @@ mod payload {
 }
 
 use std::env;
-use std::fs;
 use std::path::PathBuf;
 #[cfg(windows)]
 use window_hop::installer::Arch;
@@ -190,10 +189,16 @@ fn resolve_payload_source(custom_source: Option<PathBuf>) -> PathBuf {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+    let exe_name = env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_lowercase()))
+        .unwrap_or_default();
+    let is_uninstall_binary = exe_name.contains("uninstall");
+
     let mut custom_dir = None;
     let mut custom_source = None;
     let mut is_silent = false;
-    let mut is_uninstall = false;
+    let mut is_uninstall = is_uninstall_binary;
     let mut no_shortcuts = false;
 
     let mut i = 1;
@@ -234,7 +239,7 @@ fn main() {
     }
 
     let install_dir = custom_dir.unwrap_or_else(default_install_dir);
-    let _is_interactive = args.len() == 1; // Pengguna klik ganda installer di Windows Explorer
+    let _is_interactive = args.len() == 1 || (is_uninstall && !is_silent); // Pengguna klik ganda installer/uninstaller di Windows Explorer
 
     // Alur Pencopotan (Uninstallation)
     if is_uninstall {
@@ -357,12 +362,6 @@ fn main() {
 
     match install(&options) {
         Ok(receipt) => {
-            // Salin biner installer sebagai uninstaller lokal di direktori instalasi
-            if let Ok(curr_exe) = env::current_exe() {
-                let uninstaller_dest = install_dir.join("uninstall.exe");
-                let _ = fs::copy(curr_exe, uninstaller_dest);
-            }
-
             if !is_silent {
                 println!("\nInstalasi Window Hop berhasil diselesaikan!");
                 println!("  Versi:       {}", receipt.version);

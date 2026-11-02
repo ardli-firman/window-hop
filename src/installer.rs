@@ -353,17 +353,22 @@ fn create_windows_shortcut(
         fs::create_dir_all(parent)?;
     }
     let workdir = target_exe.parent().unwrap_or(shortcut_path);
-    let ps_script = "& { param($lnk, $target, $arg, $dir) $ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut($lnk); $s.TargetPath = $target; $s.Arguments = $arg; $s.WorkingDirectory = $dir; $s.Save() }";
+
+    // Escape single quotes in paths to prevent tokenization or injection issues in PowerShell
+    let lnk_str = shortcut_path.to_string_lossy().replace('\'', "''");
+    let target_str = target_exe.to_string_lossy().replace('\'', "''");
+    let arg_str = args.replace('\'', "''");
+    let dir_str = workdir.to_string_lossy().replace('\'', "''");
+
+    let ps_script = format!(
+        "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut('{lnk_str}'); $s.TargetPath = '{target_str}'; $s.Arguments = '{arg_str}'; $s.WorkingDirectory = '{dir_str}'; $s.Save()"
+    );
 
     let output = std::process::Command::new("powershell.exe")
         .arg("-NoProfile")
         .arg("-NonInteractive")
         .arg("-Command")
-        .arg(ps_script)
-        .arg(shortcut_path.to_string_lossy().as_ref())
-        .arg(target_exe.to_string_lossy().as_ref())
-        .arg(args)
-        .arg(workdir.to_string_lossy().as_ref())
+        .arg(&ps_script)
         .output()
         .map_err(|e| InstallError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
@@ -394,31 +399,31 @@ fn register_windows_uninstaller(
     let version = APPLICATION_VERSION;
     let install_dir_str = install_dir.to_string_lossy();
 
-    let ps_script = r#"& {
-        param($dir, $icon, $cmd, $qcmd, $ver)
-        $regPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\WindowHop'
-        if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
-        Set-ItemProperty -Path $regPath -Name 'DisplayName' -Value 'Window Hop'
-        Set-ItemProperty -Path $regPath -Name 'DisplayVersion' -Value $ver
-        Set-ItemProperty -Path $regPath -Name 'Publisher' -Value 'Window Hop Contributors'
-        Set-ItemProperty -Path $regPath -Name 'InstallLocation' -Value $dir
-        Set-ItemProperty -Path $regPath -Name 'DisplayIcon' -Value $icon
-        Set-ItemProperty -Path $regPath -Name 'UninstallString' -Value $cmd
-        Set-ItemProperty -Path $regPath -Name 'QuietUninstallString' -Value $qcmd
-        Set-ItemProperty -Path $regPath -Name 'NoModify' -Value 1 -Type DWord
-        Set-ItemProperty -Path $regPath -Name 'NoRepair' -Value 1 -Type DWord
-    }"#;
+    let dir_escaped = install_dir_str.replace('\'', "''");
+    let icon_escaped = display_icon.replace('\'', "''");
+    let cmd_escaped = uninstall_cmd.replace('\'', "''");
+    let qcmd_escaped = quiet_cmd.replace('\'', "''");
+    let ver_escaped = version.replace('\'', "''");
+
+    let ps_script = format!(
+        r#"$regPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\WindowHop';
+if (-not (Test-Path $regPath)) {{ New-Item -Path $regPath -Force | Out-Null }};
+Set-ItemProperty -Path $regPath -Name 'DisplayName' -Value 'Window Hop';
+Set-ItemProperty -Path $regPath -Name 'DisplayVersion' -Value '{ver_escaped}';
+Set-ItemProperty -Path $regPath -Name 'Publisher' -Value 'Window Hop Contributors';
+Set-ItemProperty -Path $regPath -Name 'InstallLocation' -Value '{dir_escaped}';
+Set-ItemProperty -Path $regPath -Name 'DisplayIcon' -Value '{icon_escaped}';
+Set-ItemProperty -Path $regPath -Name 'UninstallString' -Value '{cmd_escaped}';
+Set-ItemProperty -Path $regPath -Name 'QuietUninstallString' -Value '{qcmd_escaped}';
+Set-ItemProperty -Path $regPath -Name 'NoModify' -Value 1 -Type DWord;
+Set-ItemProperty -Path $regPath -Name 'NoRepair' -Value 1 -Type DWord;"#
+    );
 
     let output = std::process::Command::new("powershell.exe")
         .arg("-NoProfile")
         .arg("-NonInteractive")
         .arg("-Command")
-        .arg(ps_script)
-        .arg(install_dir_str.as_ref())
-        .arg(&display_icon)
-        .arg(&uninstall_cmd)
-        .arg(&quiet_cmd)
-        .arg(version)
+        .arg(&ps_script)
         .output()
         .map_err(|e| InstallError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
@@ -483,6 +488,15 @@ pub fn install(options: &InstallOptions) -> Result<InstallReceipt, InstallError>
         let guide_path = options.install_dir.join("INSTALL-GUIDE.txt");
         fs::write(&guide_path, INSTALL_GUIDE_CONTENT)?;
         installed_files.push(guide_path);
+    }
+
+    // Salin biner saat ini sebagai uninstaller mandiri (uninstall.exe) sebelum registrasi Windows uninstaller
+    let uninstaller_dest = options.install_dir.join("uninstall.exe");
+    if let Ok(curr) = std::env::current_exe() {
+        let _ = fs::copy(&curr, &uninstaller_dest);
+        if uninstaller_dest.exists() {
+            installed_files.push(uninstaller_dest);
+        }
     }
 
     #[allow(unused_mut)]
