@@ -23,6 +23,7 @@ Status: kriteria penerimaan untuk spesifikasi versi pertama yang disetujui pengg
 | Kegagalan aktivasi otomatis | Tray dan detail UI menunjukkan kegagalan tanpa membuka window atau merebut fokus. |
 | Kegagalan tindakan melalui UI | Kesalahan muncul pada UI yang sedang digunakan. |
 | Browser x86 dan x64 pada Windows x64 | Jalankan skenario profil yang sama untuk masing-masing browser yang dinyatakan kompatibel. |
+| Instalasi, pembuatan profil aktif, aktivasi shortcut, dan pendaftaran startup pada Windows Defender aktif | Seluruh alur berjalan lancar tanpa deteksi heuristik antivirus (misal `Trojan:Script/Wacatac` atau `Behavior:Win32/Persistence`), tanpa pemanggilan `powershell.exe`, dan biner tidak dikarantina oleh Windows Defender. |
 
 ## Catatan pengamatan
 
