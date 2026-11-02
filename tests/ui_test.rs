@@ -11,6 +11,7 @@ use window_hop::domain::{
     ExitReason, MonitorDescriptor, MonitorIdentity, ProcessId, Profile, ProfileId,
     ProfileLifecycleState, ProfileStatus, TargetMonitorStatus,
 };
+use window_hop::ui::dashboard::{DashboardStats, ProfileCardModel, DASHBOARD_GRID_COLUMNS};
 use window_hop::ui::sidebar::{
     filter_profiles_by_query, profile_has_unsaved_changes, should_show_profile_search,
     ProfileFormDraft, ProfileStatusBadge, SEARCH_MIN_PROFILES, STARTUP_BADGE_LABEL,
@@ -21,10 +22,11 @@ use window_hop::ui::tokens::{
     WINDOW_MIN_WIDTH,
 };
 use window_hop::ui::{
-    find_occupying_profile, ActionBarModel, ActionKind, BrowserCompatibilityBadge,
-    BrowserQuickTileModel, DeleteConfirmationModalModel, MonitorCardModel, ShortcutOptionsModel,
-    StartupCardModel, WindowHopView, DISCONNECTED_BADGE, DISCONNECTED_WARNING,
-    MONITOR_POLL_INTERVAL, NURSE_PRIMARY_BADGE, NURSE_PRIMARY_WARNING, RECOMMENDED_QUEUE_BADGE,
+    find_occupying_profile, validate_wizard_step, ActionBarModel, ActionKind,
+    BrowserCompatibilityBadge, BrowserQuickTileModel, DeleteConfirmationModalModel,
+    MonitorCardModel, ProfileWizardStep, ShortcutOptionsModel, StartupCardModel, WindowHopView,
+    WizardValidationError, DISCONNECTED_BADGE, DISCONNECTED_WARNING, MONITOR_POLL_INTERVAL,
+    NURSE_PRIMARY_BADGE, NURSE_PRIMARY_WARNING, RECOMMENDED_QUEUE_BADGE, WIZARD_STEP_COUNT,
 };
 
 #[test]
@@ -1008,4 +1010,244 @@ fn test_delete_active_profile_shows_alert_dialog_modal_and_direct_stop_execution
 
     // 4. If called on Idle state, returns None
     assert!(DeleteConfirmationModalModel::from_profile(&p, &idle_state, false).is_none());
+}
+
+#[test]
+fn test_profile_wizard_steps_are_linear_and_click_back_only() {
+    assert_eq!(WIZARD_STEP_COUNT, 4);
+    assert_eq!(ProfileWizardStep::default(), ProfileWizardStep::Application);
+    assert_eq!(DASHBOARD_GRID_COLUMNS, 2);
+
+    assert_eq!(ProfileWizardStep::Application.index(), 0);
+    assert_eq!(ProfileWizardStep::Review.index(), 3);
+    assert_eq!(
+        ProfileWizardStep::Application.next(),
+        Some(ProfileWizardStep::Appearance)
+    );
+    assert_eq!(
+        ProfileWizardStep::Monitor.next(),
+        Some(ProfileWizardStep::Review)
+    );
+    assert_eq!(ProfileWizardStep::Review.next(), None);
+    assert_eq!(ProfileWizardStep::Application.previous(), None);
+    assert_eq!(
+        ProfileWizardStep::Review.previous(),
+        Some(ProfileWizardStep::Monitor)
+    );
+
+    assert!(ProfileWizardStep::Review.is_last());
+    assert!(!ProfileWizardStep::Monitor.is_last());
+
+    // Index helpers clamp to the valid range.
+    assert_eq!(
+        ProfileWizardStep::from_index(0),
+        ProfileWizardStep::Application
+    );
+    assert_eq!(ProfileWizardStep::from_index(3), ProfileWizardStep::Review);
+    assert_eq!(ProfileWizardStep::from_index(99), ProfileWizardStep::Review);
+
+    let labels: Vec<&str> = ProfileWizardStep::ALL
+        .iter()
+        .map(|step| step.label())
+        .collect();
+    assert_eq!(labels, vec!["Aplikasi", "Tampilan", "Monitor", "Ringkasan"]);
+    assert!(ProfileWizardStep::ALL
+        .iter()
+        .all(|step| !step.title().is_empty() && !step.description().is_empty()));
+}
+
+#[test]
+fn test_profile_wizard_validation_rules() {
+    // Step 1 requires both a name and a browser executable.
+    let error = validate_wizard_step(
+        ProfileWizardStep::Application,
+        "   ",
+        r"C:\Chrome\chrome.exe",
+        "",
+        "",
+        None,
+    )
+    .expect_err("empty name must be rejected");
+    assert_eq!(error.step, ProfileWizardStep::Application);
+    assert!(error.message.contains("Nama profil"));
+
+    let error = validate_wizard_step(
+        ProfileWizardStep::Application,
+        "Antrian Poli",
+        "  ",
+        "",
+        "",
+        None,
+    )
+    .expect_err("empty browser path must be rejected");
+    assert_eq!(error.step, ProfileWizardStep::Application);
+    assert!(error.message.contains("browser"));
+
+    assert!(validate_wizard_step(
+        ProfileWizardStep::Application,
+        "Antrian Poli",
+        r"C:\Chrome\chrome.exe",
+        "",
+        "",
+        None,
+    )
+    .is_ok());
+
+    // Step 2: an empty URL is allowed, non-http URLs are rejected.
+    assert!(validate_wizard_step(
+        ProfileWizardStep::Appearance,
+        "Antrian Poli",
+        r"C:\Chrome\chrome.exe",
+        "",
+        "",
+        None,
+    )
+    .is_ok());
+    let error = validate_wizard_step(
+        ProfileWizardStep::Appearance,
+        "Antrian Poli",
+        r"C:\Chrome\chrome.exe",
+        "antrian.rumahsakit.local/poli",
+        "",
+        None,
+    )
+    .expect_err("URL without http(s) must be rejected");
+    assert_eq!(error.step, ProfileWizardStep::Appearance);
+    assert!(error.message.contains("http://"));
+
+    // Step 2: session-isolation overrides are rejected with a clear message.
+    let error = validate_wizard_step(
+        ProfileWizardStep::Appearance,
+        "Antrian Poli",
+        r"C:\Chrome\chrome.exe",
+        "https://antrian.local/poli",
+        "--user-data-dir=C:\\temp\\nurse",
+        None,
+    )
+    .expect_err("user-data-dir must be rejected");
+    assert_eq!(error.step, ProfileWizardStep::Appearance);
+    assert!(error.message.contains("ditolak"));
+
+    // Step 3 (monitor) is always allowed because a draft profile is valid.
+    assert!(validate_wizard_step(ProfileWizardStep::Monitor, "", "", "", "", None,).is_ok());
+
+    // Review validates every step before saving and points at the step to fix.
+    let error = validate_wizard_step(
+        ProfileWizardStep::Review,
+        "",
+        r"C:\Chrome\chrome.exe",
+        "",
+        "",
+        None,
+    )
+    .expect_err("review must catch an empty name");
+    assert_eq!(error.step, ProfileWizardStep::Application);
+
+    assert!(validate_wizard_step(
+        ProfileWizardStep::Review,
+        "Antrian Poli",
+        r"C:\Chrome\chrome.exe",
+        "https://antrian.local/poli",
+        "--lang=id",
+        None,
+    )
+    .is_ok());
+}
+
+#[test]
+fn test_dashboard_stats_and_profile_card_model() {
+    let mut p1 = Profile::new_draft(
+        ProfileId::new("p1"),
+        "Antrian Poli Umum",
+        PathBuf::from(r"C:\Chrome\chrome.exe"),
+        "--app=https://antrian.local/umum --kiosk",
+    );
+    p1.set_target_monitor(Some(MonitorIdentity::new("MON-QUEUE")));
+    let p2 = Profile::new_draft(
+        ProfileId::new("p2"),
+        "Antrian Poli Gigi",
+        PathBuf::from(r"C:\Edge\msedge.exe"),
+        "",
+    );
+    let profiles = vec![p1.clone(), p2.clone()];
+
+    let mut running_ids = std::collections::HashSet::new();
+    running_ids.insert(ProfileId::new("p1"));
+
+    let stats = DashboardStats::from_profiles(&profiles, &running_ids, Some(&ProfileId::new("p2")));
+    assert_eq!(stats.total, 2);
+    assert_eq!(stats.active, 1);
+    assert_eq!(
+        stats.startup_profile_name.as_deref(),
+        Some("Antrian Poli Gigi")
+    );
+    assert_eq!(stats.summary_label(), "2 profil · 1 aktif");
+
+    let monitors = vec![MonitorDescriptor {
+        identity: MonitorIdentity::new("MON-QUEUE"),
+        name: "LG TV Antrian".to_string(),
+        is_primary: false,
+    }];
+    let card = ProfileCardModel::from_profile(
+        &p1,
+        &monitors,
+        &ProfileLifecycleState::Idle,
+        Some(&ProfileId::new("p2")),
+    )
+    .with_running_changes(true);
+
+    assert_eq!(card.name, "Antrian Poli Umum");
+    assert_eq!(card.browser_name, "chrome.exe");
+    assert_eq!(card.url, "https://antrian.local/umum");
+    assert_eq!(card.monitor_label, "LG TV Antrian");
+    assert_eq!(card.status.label, "Siap");
+    assert!(!card.is_startup);
+    assert!(!card.is_running);
+    assert!(card.has_running_changes);
+    assert!(!card.needs_monitor_setup());
+    assert_eq!(card.monitor_setup_label(), "Aktifkan Profil");
+
+    // A profile without a monitor is shown as a draft card.
+    let draft_card = ProfileCardModel::from_profile(
+        &p2,
+        &monitors,
+        &ProfileLifecycleState::Idle,
+        Some(&ProfileId::new("p2")),
+    );
+    assert_eq!(draft_card.monitor_label, "Belum dipilih (draft)");
+    assert_eq!(draft_card.url, "Tanpa URL antrian");
+    assert_eq!(draft_card.status.label, "Draft");
+    assert!(draft_card.is_startup);
+    assert!(draft_card.needs_monitor_setup());
+    assert_eq!(draft_card.monitor_setup_label(), "Lengkapi Profil");
+
+    // A recorded monitor that is no longer connected keeps its identity visible.
+    let missing_card = ProfileCardModel::from_profile(&p1, &[], &ProfileLifecycleState::Idle, None);
+    assert!(missing_card.monitor_label.contains("tidak terhubung"));
+    assert_eq!(missing_card.status.label, "Tidak Tersedia");
+    assert!(missing_card.needs_monitor_setup());
+    assert_eq!(missing_card.monitor_setup_label(), "Pilih Monitor");
+
+    let running_card = ProfileCardModel::from_profile(
+        &p1,
+        &monitors,
+        &ProfileLifecycleState::Running {
+            pid: ProcessId::new(42),
+            target_monitor: monitors[0].clone(),
+        },
+        None,
+    );
+    assert!(running_card.is_running);
+    assert_eq!(running_card.status.label, "Aktif");
+    assert!(!running_card.needs_monitor_setup());
+}
+
+#[test]
+fn test_wizard_validation_error_is_structured() {
+    let error = WizardValidationError {
+        step: ProfileWizardStep::Appearance,
+        message: "URL antrian harus diawali http:// atau https://.".to_string(),
+    };
+    assert_eq!(error.step.index(), 1);
+    assert!(error.message.starts_with("URL"));
 }

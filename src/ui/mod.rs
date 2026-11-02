@@ -1,11 +1,12 @@
 //! GPUI presentation for Window Hop profile management.
 //!
 //! Structured as a modular domain package under `src/ui/`:
-//! - `sidebar`: Left navigation column (fixed 320 px)
-//! - `form`: Right detail panel (flex-1)
+//! - `dashboard`: Profile dashboard with the complete profile list and quick actions
+//! - `profile_wizard`: Step-by-step modal for creating/editing a profile
+//! - `form`: Wizard step content (application, appearance, monitor, review)
 //! - `browser_picker`: Detected browsers and executable resolution
 //! - `monitor_card`: Target monitor selection and readiness evaluation
-//! - `action_bar`: Lifecycle action buttons (save, activate, restart, stop, shortcut, delete, reset)
+//! - `action_bar`: Dashboard quick-action model plus activation lifecycle commands
 //! - `dialogs`: Notification banner and active profile delete confirmation dialog
 //! - `tokens`: Design and layout dimensions matching shadcn Zinc/Slate
 
@@ -26,19 +27,25 @@ use crate::domain::{
 
 pub(crate) mod action_bar;
 pub(crate) mod browser_picker;
+pub mod dashboard;
 pub(crate) mod dialogs;
 pub(crate) mod form;
 pub(crate) mod monitor_card;
+pub mod profile_wizard;
 pub mod sidebar;
 pub mod tokens;
 
 pub use action_bar::{ActionBarAction, ActionBarModel, ActionKind, ShortcutOptionsModel};
 pub use browser_picker::{BrowserCompatibilityBadge, BrowserQuickTileModel};
+pub use dashboard::{DashboardStats, ProfileCardModel};
 pub use dialogs::DeleteConfirmationModalModel;
 pub use form::StartupCardModel;
 pub use monitor_card::{
     find_occupying_profile, MonitorCardModel, DISCONNECTED_BADGE, DISCONNECTED_WARNING,
     MONITOR_POLL_INTERVAL, NURSE_PRIMARY_BADGE, NURSE_PRIMARY_WARNING, RECOMMENDED_QUEUE_BADGE,
+};
+pub use profile_wizard::{
+    validate_wizard_step, ProfileWizardStep, WizardValidationError, WIZARD_STEP_COUNT,
 };
 pub use tokens::*;
 
@@ -53,7 +60,6 @@ pub struct WindowHopView {
     pub(crate) cached_startup_profile_id: Option<ProfileId>,
     pub(crate) is_busy: bool,
     pub(crate) selected_profile_id: Option<ProfileId>,
-    pub(crate) selected_target_monitor: Option<MonitorIdentity>,
     pub(crate) cached_monitors: Vec<MonitorDescriptor>,
     pub(crate) monitors_error: Option<String>,
     pub(crate) cached_detected_browsers: Vec<DetectedBrowser>,
@@ -73,7 +79,11 @@ pub struct WindowHopView {
     pub(crate) status_message: Option<String>,
     pub(crate) is_error: bool,
     pub(crate) confirming_delete_profile: Option<ProfileId>,
-    pub(crate) is_shortcut_popover_open: bool,
+    pub(crate) is_profile_modal_open: bool,
+    pub(crate) wizard_step: ProfileWizardStep,
+    pub(crate) wizard_error: Option<String>,
+    pub(crate) wizard_session: u64,
+    pub(crate) selected_target_monitor: Option<MonitorIdentity>,
 }
 
 impl WindowHopView {
@@ -99,7 +109,7 @@ impl WindowHopView {
                 .placeholder(r"C:\Program Files\Google\Chrome\Application\chrome.exe")
         });
         let url_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("misal: https://antrian.rumahsakit.local/poli")
+            InputState::new(window, cx).placeholder(r"misal: https://antrian.rumahsakit.local/poli")
         });
         let advanced_params_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("misal: --disable-gpu --lang=id"));
@@ -110,7 +120,7 @@ impl WindowHopView {
         let search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Cari nama profil..."));
 
-        // Observasi input untuk re-rendering instan saat pengguna mengetik (filter pencarian & indikator dot perubahan)
+        // Observasi input untuk re-rendering instan saat pengguna mengetik (filter pencarian & preview parameter)
         cx.observe(&search_input, |_, _, cx| cx.notify()).detach();
         cx.observe(&name_input, |_, _, cx| cx.notify()).detach();
         cx.observe(&path_input, |_, _, cx| cx.notify()).detach();
@@ -256,7 +266,6 @@ impl WindowHopView {
             cached_startup_profile_id,
             is_busy: false,
             selected_profile_id: None,
-            selected_target_monitor: None,
             cached_monitors,
             monitors_error,
             cached_detected_browsers,
@@ -276,7 +285,11 @@ impl WindowHopView {
             status_message: initial_error,
             is_error,
             confirming_delete_profile: None,
-            is_shortcut_popover_open: false,
+            is_profile_modal_open: false,
+            wizard_step: ProfileWizardStep::Application,
+            wizard_error: None,
+            wizard_session: 0,
+            selected_target_monitor: None,
         }
     }
 
@@ -325,7 +338,7 @@ impl WindowHopView {
         self.cached_profiles.iter().find(|p| p.id() == pid)
     }
 
-    /// Memilih profil untuk diedit atau beralih ke form profil baru.
+    /// Memuat profil ke dalam input form (tanpa membuka modal).
     pub fn select_profile(
         &mut self,
         id: Option<ProfileId>,
@@ -405,7 +418,7 @@ impl WindowHopView {
         });
     }
 
-    /// Menyimpan profil draft atau profil dengan monitor tujuan secara asinkron tanpa memblokir thread UI.
+    /// Menyimpan profil draft atau profil yang diedit secara asinkron tanpa memblokir thread UI.
     /// Operasi disk dijalankan di background executor, dan state memori hanya dikomit
     /// setelah persistensi berhasil.
     pub fn save_profile(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -428,7 +441,9 @@ impl WindowHopView {
         if let Err(err) = lp.validate_isolation(adapter.as_ref()) {
             self.advanced_params_error = Some(err.to_string());
             self.is_advanced_params_open = true;
-            self.status_message = Some(format!("Parameter baris perintah ditolak: {}", err));
+            self.wizard_step = ProfileWizardStep::Appearance;
+            self.wizard_error = Some(format!("Parameter baris perintah ditolak: {}", err));
+            self.status_message = self.wizard_error.clone();
             self.is_error = true;
             cx.notify();
             return;
@@ -446,9 +461,10 @@ impl WindowHopView {
             .unwrap()
             .prepare_draft_save(self.selected_profile_id.as_ref(), &input);
 
-        let (candidate_config, target_id) = match prepare_result {
+        let (candidate_config, _target_id) = match prepare_result {
             Ok(res) => res,
             Err(err) => {
+                self.wizard_error = Some(err.to_string());
                 self.status_message = Some(err.to_string());
                 self.is_error = true;
                 cx.notify();
@@ -482,14 +498,17 @@ impl WindowHopView {
                                 coord.commit_saved_config(candidate_config);
                                 view.sync_cache_from_coordinator(&coord);
                                 drop(coord);
-                                view.selected_profile_id = Some(target_id);
-                                view.status_message =
-                                    Some("Profil berhasil disimpan secara atomik.".to_string());
+                                view.selected_profile_id = None;
+                                view.is_profile_modal_open = false;
+                                view.wizard_step = ProfileWizardStep::Application;
+                                view.wizard_error = None;
+                                view.status_message = Some("Profil berhasil disimpan.".to_string());
                                 view.is_error = false;
                             }
                             Err(err) => {
-                                view.status_message =
-                                    Some(format!("Gagal menyimpan ke penyimpanan: {}", err));
+                                let message = format!("Gagal menyimpan ke penyimpanan: {}", err);
+                                view.wizard_error = Some(message.clone());
+                                view.status_message = Some(message);
                                 view.is_error = true;
                             }
                         }
@@ -547,7 +566,11 @@ impl Render for WindowHopView {
                     h_flex()
                         .items_center()
                         .gap_2()
-                        .child(Icon::new(IconName::SquareTerminal).size_4().text_color(theme.primary))
+                        .child(
+                            Icon::new(IconName::SquareTerminal)
+                                .size_4()
+                                .text_color(theme.primary),
+                        )
                         .child(
                             div()
                                 .text_sm()
@@ -563,52 +586,14 @@ impl Render for WindowHopView {
                     .p_5()
                     .gap_3()
                     .overflow_hidden()
-                    // Header
-                    .child(
-                        v_flex()
-                            .flex_shrink_0()
-                            .gap_1()
-                            .child(
-                                h_flex()
-                                    .justify_between()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .text_xl()
-                                            .font_weight(FontWeight::BOLD)
-                                            .child("Pengaturan Profil Antrian"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child("Sesi Windows: Tanpa PIN/Akun Tambahan"),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child("Konfigurasi satu aplikasi browser dan parameter kustom untuk tampilan antrian poliklinik."),
-                            ),
-                    )
                     // Banner notifikasi / status error
                     .children(self.render_status_banner(cx))
-                    // Konten Utama: Kerangka Master-Detail Dua Kolom (Sidebar 320 px + Form flex-1)
-                    .child(
-                        h_flex()
-                            .flex_1()
-                            .min_h_0()
-                            .w_full()
-                            .gap_4()
-                            .overflow_hidden()
-                            // Kolom Kiri: Master Sidebar
-                            .child(self.render_sidebar(&shadcn, cx))
-                            // Kolom Kanan: Detail Form Panel
-                            .child(self.render_form(&shadcn, cx))
-                    ),
+                    // Dashboard: daftar profil langsung terlihat tanpa panel detail
+                    .child(self.render_dashboard(cx)),
             )
-            // Modal AlertDialog Konfirmasi Penghapusan (Top-level Overlay dengan Backdrop Dim/Blur)
+            // Modal wizard tambah/edit profil (overlay bertahap)
+            .children(self.render_profile_wizard(cx))
+            // Modal AlertDialog Konfirmasi Penghapusan (di atas wizard)
             .children(self.render_delete_confirmation_dialog(cx))
     }
 }

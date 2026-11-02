@@ -15,7 +15,8 @@ pub const WINDOW_MIN_WIDTH: Pixels = px(920.0);
 /// Minimum allowable window height (580 px).
 pub const WINDOW_MIN_HEIGHT: Pixels = px(580.0);
 
-/// Fixed width for the master sidebar navigation column (320 px).
+/// Legacy master-detail sidebar width (320 px), retained for layout contract compatibility.
+/// The current dashboard uses a responsive two-column profile grid instead.
 pub const SIDEBAR_WIDTH: Pixels = px(320.0);
 
 /// Semantic tokens for shadcn master-detail layout styling.
