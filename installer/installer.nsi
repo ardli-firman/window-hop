@@ -146,7 +146,7 @@ SectionEnd
 Section "Uninstall"
     ; 1. Hentikan instance Window Hop jika sedang aktif
     DetailPrint "Menghentikan Window Hop jika sedang berjalan..."
-    ExecWait 'taskkill /F /IM window-hop.exe'
+    nsExec::Exec 'taskkill /F /IM window-hop.exe'
 
     ; 2. Hapus registrasi startup jika aktif
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "WindowHop"

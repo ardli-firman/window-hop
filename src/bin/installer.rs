@@ -67,8 +67,13 @@ fn detect_current_os() -> Result<OsVersion, InstallError> {
 
 #[cfg(windows)]
 fn get_windows_version() -> Result<(u32, u32, u32), InstallError> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
     let script = "& { [System.Environment]::OSVersion.Version.ToString() }";
-    let output = std::process::Command::new("powershell.exe")
+    let mut cmd = std::process::Command::new("powershell.exe");
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let output = cmd
         .arg("-NoProfile")
         .arg("-NonInteractive")
         .arg("-Command")

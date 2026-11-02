@@ -1,11 +1,13 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 use std::sync::{Arc, Mutex};
 use window_hop::application::LifecycleCoordinator;
 use window_hop::persistence::{default_config_path, FileProfileStore};
 use window_hop::platform::{
-    parse_activation_flag, parse_silent_or_startup_flag, ActivationCommand,
-    LocalSingleInstanceCoordinator, SingleInstanceCoordinator, TrayAction,
+    parse_activation_flag, parse_open_settings_flag, parse_silent_or_startup_flag,
+    ActivationCommand, LocalSingleInstanceCoordinator, SingleInstanceCoordinator, TrayAction,
 };
 use window_hop::ui::tokens::{
     WINDOW_INITIAL_HEIGHT, WINDOW_INITIAL_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
@@ -57,6 +59,7 @@ fn open_or_focus_settings(
 fn main() {
     let activate_profile_id = parse_activation_flag(std::env::args());
     let is_silent_or_startup = parse_silent_or_startup_flag(std::env::args());
+    let is_open_settings = parse_open_settings_flag(std::env::args());
 
     let config_path = default_config_path();
     let base_data_dir = config_path.parent().unwrap_or(&config_path).to_path_buf();
@@ -69,6 +72,11 @@ fn main() {
             // Berhasil dikirim ke koordinator yang sedang berjalan; keluar segera tanpa membuka pengaturan
             return;
         }
+    } else if is_open_settings {
+        // Jika dipanggil dengan flag --settings atau --open-settings dan sudah ada instance berjalan di tray, minta buka pengaturan
+        if let Ok(true) = ipc.send_activation(&ActivationCommand::OpenSettings) {
+            return;
+        }
     } else if is_silent_or_startup {
         // Jika dipanggil silent/startup dan sudah ada instance primer yang berjalan di tray,
         // kirim Startup agar instance primer mengaktifkan profil startup jika belum aktif,
@@ -77,8 +85,9 @@ fn main() {
             return;
         }
     } else {
-        // Jika dipanggil secara normal tanpa argumen dan sudah ada instance berjalan di tray, minta buka pengaturan
-        if let Ok(true) = ipc.send_activation(&ActivationCommand::OpenSettings) {
+        // Jika dipanggil secara normal tanpa argumen dan sudah ada instance berjalan di tray,
+        // kirim Ping agar tidak menduplikasi instance, dan tetap aktif di tray tanpa membuka jendela pengaturan
+        if let Ok(true) = ipc.send_activation(&ActivationCommand::Ping) {
             return;
         }
     }
@@ -91,7 +100,8 @@ fn main() {
     let coordinator_arc = Arc::new(Mutex::new(coordinator));
     let window_slot: Arc<Mutex<Option<AnyWindowHandle>>> = Arc::new(Mutex::new(None));
 
-    let should_open_settings = activate_profile_id.is_none() && !is_silent_or_startup;
+    // Masuk ke tray icon secara default; jendela pengaturan hanya dibuka jika diminta eksplisit lewat flag
+    let should_open_settings = is_open_settings;
 
     let (event_tx, event_rx) = async_channel::unbounded::<AppEvent>();
 
@@ -190,16 +200,14 @@ fn main() {
                 if let Ok(mut coord) = coordinator_arc.lock() {
                     let _ = coord.handle_shortcut_activation(profile_id);
                 }
-            }
-
-            // Jika dimulai dengan flag startup/silent/tray, jalankan aktivasi profil startup di latar belakang
-            if is_silent_or_startup {
+            } else {
+                // Jalankan aktivasi profil startup di latar belakang jika startup aktif
                 if let Ok(mut coord) = coordinator_arc.lock() {
                     let _ = coord.handle_startup_activation();
                 }
             }
 
-            // 6. Buka jendela pengaturan jika dipanggil secara normal (bukan startup/silent/shortcut)
+            // 6. Buka jendela pengaturan hanya jika diminta eksplisit via --settings / --open-settings
             if should_open_settings {
                 open_or_focus_settings(coordinator_arc.clone(), window_slot.clone(), cx);
             }
