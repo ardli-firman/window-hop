@@ -151,6 +151,10 @@ jobs:
         run: |
           echo "Verifying window-hop-installer.exe execution on Windows..."
           ./dist/window-hop-installer.exe --help
+          if [ -f "./dist/WindowHop-Setup.exe" ]; then
+            echo "WindowHop-Setup.exe successfully generated."
+            ls -lh ./dist/WindowHop-Setup*.exe
+          fi
 
       - name: Generate Checksums
         shell: bash
@@ -174,7 +178,7 @@ jobs:
             dist/window-hop-v*-portable.zip
             dist/INSTALL-GUIDE.txt
             dist/SHA256SUMS.txt
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == true

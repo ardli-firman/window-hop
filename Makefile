@@ -136,12 +136,19 @@ installer:
 	@echo "==> Building self-contained release installer executable..."
 	WINDOW_HOP_PAYLOAD_PATH=$(RELEASE_DIR)/window-hop$(EXE_EXT) cargo build --release $(CARGO_TARGET_FLAG) --bin window-hop-installer
 	@echo "Release installer built at $(RELEASE_DIR)/window-hop-installer$(EXE_EXT)"
-	@if [ -n "$(NSIS_BIN)" ]; then \
+	@if command -v makensis >/dev/null 2>&1; then \
 		mkdir -p $(DIST_DIR); \
 		cp $(RELEASE_DIR)/window-hop$(EXE_EXT) $(DIST_DIR)/; \
 		cp docs/install-guide.md $(DIST_DIR)/INSTALL-GUIDE.txt; \
 		echo "==> Compiling NSIS installer $(DIST_DIR)/$(SETUP_EXE)..."; \
-		$(NSIS_BIN) -DVERSION=$(VERSION) -DOUTFILE=../$(DIST_DIR)/$(SETUP_EXE) installer/installer.nsi; \
+		makensis -DVERSION=$(VERSION) installer/installer.nsi; \
+		cp $(DIST_DIR)/$(SETUP_EXE) $(DIST_DIR)/$(SETUP_VERSIONED_EXE); \
+	elif [ -n "$(NSIS_BIN)" ]; then \
+		mkdir -p $(DIST_DIR); \
+		cp $(RELEASE_DIR)/window-hop$(EXE_EXT) $(DIST_DIR)/; \
+		cp docs/install-guide.md $(DIST_DIR)/INSTALL-GUIDE.txt; \
+		echo "==> Compiling NSIS installer $(DIST_DIR)/$(SETUP_EXE)..."; \
+		"$(NSIS_BIN)" -DVERSION=$(VERSION) installer/installer.nsi; \
 		cp $(DIST_DIR)/$(SETUP_EXE) $(DIST_DIR)/$(SETUP_VERSIONED_EXE); \
 	fi
 
@@ -155,9 +162,13 @@ package: release
 	@cp $(RELEASE_DIR)/window-hop$(EXE_EXT) $(DIST_DIR)/
 	@cp $(RELEASE_DIR)/window-hop-installer$(EXE_EXT) $(DIST_DIR)/
 	@cp docs/install-guide.md $(DIST_DIR)/INSTALL-GUIDE.txt
-	@if [ -n "$(NSIS_BIN)" ]; then \
+	@if command -v makensis >/dev/null 2>&1; then \
 		echo "==> Compiling NSIS installer $(DIST_DIR)/$(SETUP_EXE)..."; \
-		$(NSIS_BIN) -DVERSION=$(VERSION) -DOUTFILE=../$(DIST_DIR)/$(SETUP_EXE) installer/installer.nsi; \
+		makensis -DVERSION=$(VERSION) installer/installer.nsi; \
+		cp $(DIST_DIR)/$(SETUP_EXE) $(DIST_DIR)/$(SETUP_VERSIONED_EXE); \
+	elif [ -n "$(NSIS_BIN)" ]; then \
+		echo "==> Compiling NSIS installer $(DIST_DIR)/$(SETUP_EXE)..."; \
+		"$(NSIS_BIN)" -DVERSION=$(VERSION) installer/installer.nsi; \
 		cp $(DIST_DIR)/$(SETUP_EXE) $(DIST_DIR)/$(SETUP_VERSIONED_EXE); \
 	else \
 		echo "==> makensis not found, skipping NSIS setup compiler. Bundled window-hop-installer$(EXE_EXT) is available."; \
